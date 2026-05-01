@@ -2,15 +2,27 @@
  * Embedding Service
  * Ported from production Ruby implementation (embedding_service.rb, 190 LOC)
  *
- * OpenAI text-embedding-3-large at 1536 dimensions.
+ * Defaults to OpenAI text-embedding-3-large at 1536 dimensions.
+ * Environment overrides allow OpenAI-compatible local/cloud providers:
+ *   GBRAIN_EMBEDDING_MODEL
+ *   GBRAIN_EMBEDDING_DIMENSIONS
+ *   GBRAIN_EMBEDDING_BASE_URL
+ *   GBRAIN_EMBEDDING_API_KEY
+ *   GBRAIN_EMBEDDING_PASS_DIMENSIONS
+ *
  * Retry with exponential backoff (4s base, 120s cap, 5 retries).
  * 8000 character input truncation.
  */
 
 import OpenAI from 'openai';
 
-const MODEL = 'text-embedding-3-large';
-const DIMENSIONS = 1536;
+const MODEL = process.env.GBRAIN_EMBEDDING_MODEL || 'text-embedding-3-large';
+const DIMENSIONS = parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS || '1536', 10);
+const BASE_URL = process.env.GBRAIN_EMBEDDING_BASE_URL;
+const API_KEY = process.env.GBRAIN_EMBEDDING_API_KEY || process.env.OPENAI_API_KEY;
+const PASS_DIMENSIONS = process.env.GBRAIN_EMBEDDING_PASS_DIMENSIONS
+  ? process.env.GBRAIN_EMBEDDING_PASS_DIMENSIONS === 'true'
+  : !BASE_URL;
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;
@@ -21,7 +33,10 @@ let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
   if (!client) {
-    client = new OpenAI();
+    const opts: { baseURL?: string; apiKey?: string } = {};
+    if (BASE_URL) opts.baseURL = BASE_URL;
+    if (API_KEY) opts.apiKey = API_KEY;
+    client = new OpenAI(opts);
   }
   return client;
 }
@@ -62,11 +77,12 @@ export async function embedBatch(
 async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const response = await getClient().embeddings.create({
+      const req: { model: string; input: string[]; dimensions?: number } = {
         model: MODEL,
         input: texts,
-        dimensions: DIMENSIONS,
-      });
+      };
+      if (PASS_DIMENSIONS) req.dimensions = DIMENSIONS;
+      const response = await getClient().embeddings.create(req);
 
       // Sort by index to maintain order
       const sorted = response.data.sort((a, b) => a.index - b.index);

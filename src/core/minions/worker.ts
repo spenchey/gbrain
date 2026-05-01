@@ -91,7 +91,7 @@ export class MinionWorker extends EventEmitter {
       lockDuration: opts?.lockDuration ?? 30000,
       stalledInterval: opts?.stalledInterval ?? 30000,
       maxStalledCount: opts?.maxStalledCount ?? 1,
-      pollInterval: opts?.pollInterval ?? 5000,
+      pollInterval: opts?.pollInterval ?? (Number(process.env.GBRAIN_MINION_POLL_INTERVAL_MS) || 5000),
       maxRssMb: opts?.maxRssMb ?? 0,
       getRss: opts?.getRss ?? (() => process.memoryUsage().rss),
       rssCheckInterval: opts?.rssCheckInterval ?? 60000,
