@@ -10,6 +10,8 @@ GBrain is those patterns, generalized. 34 skills. Install in 30 minutes. Your ag
 
 **New in v0.25.0 — BrainBench-Real (session capture, contributor opt-in):** with `GBRAIN_CONTRIBUTOR_MODE=1` set in your shell, every real `query` + `search` call through MCP, CLI, or the subagent tool-bridge gets captured (PII-scrubbed) into an `eval_candidates` table. Snapshot with `gbrain eval export`, replay against your code change with `gbrain eval replay`. Three numbers come back: mean Jaccard@k between captured and current retrieved slugs, top-1 stability, and latency Δ. **Off by default** for production users — no surprise data accumulation. Walkthrough: [docs/eval-bench.md](docs/eval-bench.md). NDJSON wire format: [docs/eval-capture.md](docs/eval-capture.md).
 
+**New in v0.28.8 — LongMemEval in the box:** `gbrain eval longmemeval <dataset.jsonl>` runs the public [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval) benchmark against gbrain's hybrid retrieval. One in-memory PGLite per run, `TRUNCATE` between questions (runtime-enumerated tables, schema-migration-safe), 25.9ms p50 per question on Apple Silicon. Your `~/.gbrain` brain is never touched. Retrieved chat content is sanitized with the same `INJECTION_PATTERNS` that protect takes — one source of truth for prompt-injection defense. Hand the JSONL output to LongMemEval's `evaluate_qa.py` to score.
+
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
 
 > **LLMs:** fetch [`llms.txt`](llms.txt) for the documentation map, or [`llms-full.txt`](llms-full.txt) for the same map with core docs inlined in one fetch. **Agents:** start with [`AGENTS.md`](AGENTS.md) (or [`CLAUDE.md`](CLAUDE.md) if you're Claude Code).
@@ -51,6 +53,14 @@ postinstall hook on global installs, so schema migrations never run and the CLI
 aborts with `Aborted()` the first time it opens PGLite. Use `git clone + bun install
 && bun link` as shown above. See [#218](https://github.com/garrytan/gbrain/issues/218).
 
+**Do NOT use `bun add -g gbrain` or `npm install -g gbrain`.** The npm registry
+has an unrelated package squatting that name (`gbrain@1.3.x`) — you'd silently
+install the wrong binary and overwrite the canonical one. v0.28.5+ detects this
+and prints a recovery message on `gbrain upgrade`, but the `git clone + bun link`
+path above is the only reliable install method until we publish under
+`@garrytan/gbrain` (tracked v0.29 follow-up). See
+[#658](https://github.com/garrytan/gbrain/issues/658).
+
 ```
 3 results (hybrid search, 0.12s):
 
@@ -79,16 +89,36 @@ GBrain exposes 30+ MCP tools via stdio:
 
 Add to `~/.claude/server.json` (Claude Code), Settings > MCP Servers (Cursor), or your client's MCP config.
 
-### Remote MCP (Claude Desktop, Cowork, Perplexity)
+### Remote MCP with OAuth 2.1 (ChatGPT, Claude Desktop, Cowork, Perplexity)
+
+`gbrain serve --http` starts a production-grade OAuth 2.1 server with an embedded admin dashboard. Zero external infrastructure. Every major AI client connects, every request is scoped, every action is logged.
 
 ```bash
-gbrain auth create "claude-desktop"            # tokens via the existing CLI
-gbrain serve --http --port 8787                 # built-in HTTP transport (Postgres-only)
-ngrok http 8787 --url your-brain.ngrok.app      # any tunnel works
+# Start the HTTP server (prints admin bootstrap token on first start)
+gbrain serve --http --port 3131
+
+# Open the admin dashboard, paste the bootstrap token, register a client
+open http://localhost:3131/admin
+
+# Expose publicly (set --public-url so the OAuth issuer matches)
+ngrok http 3131 --url your-brain.ngrok.app
+gbrain serve --http --port 3131 --public-url https://your-brain.ngrok.app
+
+# ChatGPT and other OAuth-aware clients can also connect:
 claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization: Bearer TOKEN"
 ```
 
-Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). Hardening defaults, env vars, and threat model: [SECURITY.md](SECURITY.md). ChatGPT requires OAuth 2.1 (not yet implemented).
+Register OAuth clients from the `/admin` dashboard — click **Register client**,
+pick scopes, save the credentials shown once in the reveal modal. Programmatic
+registration via `oauthProvider.registerClientManual(...)` and the
+`gbrain auth register-client` CLI are also available.
+
+- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. Optional Dynamic Client Registration behind `--enable-dcr` (DCR redirect_uris must be `https://` or loopback per RFC 6749 §3.1.2.1).
+- **Scoped operations** — 30 operations tagged `read | write | admin`. `sync_brain` and `file_upload` are `localOnly`, rejected over HTTP.
+- **React admin dashboard** — 7 screens baked into the binary (~65KB gzip). Live SSE activity feed, agents table, credential reveal, filterable request log, per-client config export.
+- **Legacy bearer tokens still work** — pre-v0.26 `gbrain auth create` tokens continue to authenticate as `read+write+admin`. v0.22.7's simpler `src/mcp/http-transport.ts` path stays compiled in for backward compat callers; v0.26+ deployments use the OAuth-aware `serve-http.ts`.
+
+Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). Hardening defaults, env vars, and threat model: [SECURITY.md](SECURITY.md).
 
 ### Using gbrain with GStack
 
@@ -419,6 +449,7 @@ GBrain ships integration recipes that your agent sets up for you. Each recipe te
 | [X-to-Brain](recipes/x-to-brain.md) | — | Twitter timeline + mentions + deletions |
 | [Calendar-to-Brain](recipes/calendar-to-brain.md) | credential-gateway | Google Calendar to searchable daily pages |
 | [Meeting Sync](recipes/meeting-sync.md) | — | Circleback transcripts to brain pages with attendees |
+| [Restart Sweep](recipes/restart-sweep.md) | OpenClaw + Telegram | Detect dropped Telegram messages after OpenClaw gateway restarts |
 
 **Data research recipes** extract structured data from email into tracked brain pages. Built-in recipes for investor updates (MRR, ARR, runway, headcount), expense tracking, and company metrics. Create your own with `gbrain research init`.
 
@@ -453,6 +484,8 @@ Run `gbrain integrations` to see status.
 ```
 
 The repo is the system of record. GBrain is the retrieval layer. The agent reads and writes through both. Human always wins... edit any markdown file and `gbrain sync` picks up the changes.
+
+For multi-machine setups (cross-machine thin client) and multi-worktree setups (per-worktree code engine + shared remote artifacts), see [`docs/architecture/topologies.md`](docs/architecture/topologies.md).
 
 ## The Knowledge Model
 
@@ -701,16 +734,39 @@ SKILLS (v0.19)
                                         SKILLIFY_STUB). Accepts RESOLVER.md OR AGENTS.md.
   gbrain routing-eval [--llm] [--json]  Intent→skill routing accuracy on fixtures
 
+EVAL
+  gbrain eval --qrels <path>            Legacy IR-eval (P@k, R@k, MRR, nDCG@k against ground truth)
+  gbrain eval export [--since DUR]      Stream captured eval_candidates as NDJSON (BrainBench-Real)
+  gbrain eval prune --older-than DUR    Retention cleanup for eval_candidates (requires window)
+  gbrain eval replay --against FILE     Replay captured queries vs current build (Jaccard@k, top-1, latency Δ)
+  gbrain eval longmemeval <dataset>     Run public LongMemEval against gbrain hybrid retrieval (v0.28.8)
+                                        [--limit N] [--retrieval-only] [--keyword-only] [--expansion]
+                                        [--top-k K] [--model M] [--output FILE]
+
 ADMIN
   gbrain doctor [--json] [--fast]       Health checks (resolver, skills, DB, embeddings)
   gbrain doctor --fix [--dry-run]       Auto-fix DRY violations (delegate inlined rules to conventions)
   gbrain doctor --locks                 List idle-in-tx backends (57014 diagnostic, Postgres only)
   gbrain stats                          Brain statistics
   gbrain serve                          MCP server (stdio)
-  gbrain serve --http --port 8787       MCP server (HTTP, Postgres-only, bearer auth)
-  gbrain auth create|list|revoke|test   Token management for the HTTP transport
+  gbrain serve --http [--port 3131]     HTTP MCP server with OAuth 2.1 + admin dashboard
+                                        [--token-ttl 3600] [--enable-dcr]
+                                        [--public-url URL] [--log-full-params]
+  gbrain auth create|list|revoke|test   Legacy bearer token management
+  gbrain auth register-client <name>    Register an OAuth 2.1 client
+        --grant-types client_credentials,authorization_code
+        --scopes "read write admin"
+  gbrain auth revoke-client <client_id> Revoke an OAuth 2.1 client (cascade purges
+                                        active tokens + auth codes via FK CASCADE)
+  # OAuth 2.1 clients can also be registered from the /admin dashboard or
+  # programmatically via oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain sources list|add|remove|...    Multi-source brain management (v0.18)
+                                        v0.28.2: --url <https://...> registers a federated
+                                        remote git repo; clone is auto-managed under
+                                        $GBRAIN_HOME/clones/<id>/ and re-cloned on sync if
+                                        it goes missing. Also exposed via MCP for remote
+                                        agent setup (whoami + sources_{add,list,remove,status}).
   gbrain dream [--dry-run] [--phase N]  8-phase maintenance cycle (lint→backlinks→sync→synthesize
                                         →extract→patterns→embed→orphans). v0.23 added synthesize +
                                         patterns: transcripts → reflections + cross-session themes.
@@ -758,7 +814,7 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun run test` for the parallel unit-test fast loop (~85s on a Mac dev box, 3700+ tests) or `bun run verify` for the pre-push gate (privacy + jsonb + progress + test-isolation + wasm + admin-build + typecheck). For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
 
 If you're working on retrieval or any of the search/embedding/ranking surface, set `GBRAIN_CONTRIBUTOR_MODE=1` in your shell rc and use `gbrain eval replay` to gate your changes against a snapshot of real captured queries — the dev loop is documented in [`docs/eval-bench.md`](docs/eval-bench.md). Capture is **off by default** for production users (no surprise data accumulation); the env var is the contributor opt-in.
 
