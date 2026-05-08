@@ -73,6 +73,15 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // v0.26.5 — forward-referenced by `CREATE INDEX pages_deleted_at_purge_idx
   // ON pages (deleted_at) WHERE deleted_at IS NOT NULL`.
   { kind: 'column', table: 'pages', column: 'deleted_at' },
+  // v0.29 — current code reads/writes this column after schema replay, but
+  // old pages tables do not get CREATE TABLE additions from IF NOT EXISTS.
+  { kind: 'column', table: 'pages', column: 'emotional_weight' },
+  // v0.29.1 — forward-referenced by `CREATE INDEX pages_coalesce_date_idx
+  // ON pages ((COALESCE(effective_date, updated_at)))`.
+  { kind: 'column', table: 'pages', column: 'effective_date' },
+  { kind: 'column', table: 'pages', column: 'effective_date_source' },
+  { kind: 'column', table: 'pages', column: 'import_filename' },
+  { kind: 'column', table: 'pages', column: 'salience_touched_at' },
   // v0.27.1 — forward-referenced by `CREATE INDEX idx_chunks_embedding_image
   // ON content_chunks USING hnsw (embedding_image vector_cosine_ops)
   // WHERE embedding_image IS NOT NULL`.
@@ -126,6 +135,12 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
 
       DROP INDEX IF EXISTS pages_deleted_at_purge_idx;
       ALTER TABLE pages DROP COLUMN IF EXISTS deleted_at;
+      DROP INDEX IF EXISTS pages_coalesce_date_idx;
+      ALTER TABLE pages DROP COLUMN IF EXISTS emotional_weight;
+      ALTER TABLE pages DROP COLUMN IF EXISTS effective_date;
+      ALTER TABLE pages DROP COLUMN IF EXISTS effective_date_source;
+      ALTER TABLE pages DROP COLUMN IF EXISTS import_filename;
+      ALTER TABLE pages DROP COLUMN IF EXISTS salience_touched_at;
 
       DROP INDEX IF EXISTS idx_chunks_embedding_image;
       ALTER TABLE content_chunks DROP COLUMN IF EXISTS embedding_image;
@@ -194,6 +209,12 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       ALTER TABLE links DROP COLUMN IF EXISTS origin_page_id;
       DROP INDEX IF EXISTS pages_deleted_at_purge_idx;
       ALTER TABLE pages DROP COLUMN IF EXISTS deleted_at;
+      DROP INDEX IF EXISTS pages_coalesce_date_idx;
+      ALTER TABLE pages DROP COLUMN IF EXISTS emotional_weight;
+      ALTER TABLE pages DROP COLUMN IF EXISTS effective_date;
+      ALTER TABLE pages DROP COLUMN IF EXISTS effective_date_source;
+      ALTER TABLE pages DROP COLUMN IF EXISTS import_filename;
+      ALTER TABLE pages DROP COLUMN IF EXISTS salience_touched_at;
 
       DROP INDEX IF EXISTS idx_chunks_embedding_image;
       ALTER TABLE content_chunks DROP COLUMN IF EXISTS embedding_image;

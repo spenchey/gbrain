@@ -210,7 +210,12 @@ export class PostgresEngine implements BrainEngine {
    *   - `content_chunks.search_vector` + `parent_symbol_path` + `doc_comment`
    *     + `symbol_name_qualified` columns (indexed by `idx_chunks_search_vector`
    *     and `idx_chunks_symbol_qualified`) — v0.20 Cathedral II
+   *   - `content_chunks.embedding_image` + `modality` columns
+   *     (indexed by `idx_chunks_embedding_image`) — v0.27.1
    *   - `pages.deleted_at` column (indexed by `pages_deleted_at_purge_idx`) — v0.26.5
+   *   - `pages.emotional_weight` column — v0.29
+   *   - `pages.effective_date` + salience/recency columns (indexed by
+   *     `pages_coalesce_date_idx`) — v0.29.1
    *   - `mcp_request_log.agent_name` + `params` + `error_message` columns
    *     (indexed by `idx_mcp_log_agent_time`) — v0.26.3
    *   - `subagent_messages.provider_id` column (indexed by
@@ -230,6 +235,8 @@ export class PostgresEngine implements BrainEngine {
       pages_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
+      emotional_weight_exists: boolean;
+      effective_date_exists: boolean;
       links_exists: boolean;
       link_source_exists: boolean;
       origin_page_id_exists: boolean;
@@ -237,6 +244,7 @@ export class PostgresEngine implements BrainEngine {
       symbol_name_exists: boolean;
       language_exists: boolean;
       search_vector_exists: boolean;
+      embedding_image_exists: boolean;
       mcp_log_exists: boolean;
       agent_name_exists: boolean;
       subagent_messages_exists: boolean;
@@ -249,6 +257,10 @@ export class PostgresEngine implements BrainEngine {
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'deleted_at') AS deleted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'emotional_weight') AS emotional_weight_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'effective_date') AS effective_date_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'links') AS links_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -263,6 +275,8 @@ export class PostgresEngine implements BrainEngine {
                 WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'language') AS language_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'search_vector') AS search_vector_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'content_chunks' AND column_name = 'embedding_image') AS embedding_image_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'mcp_request_log') AS mcp_log_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -279,16 +293,26 @@ export class PostgresEngine implements BrainEngine {
       && (!probe.link_source_exists || !probe.origin_page_id_exists);
     const needsChunksBootstrap = probe.chunks_exists
       && (!probe.symbol_name_exists || !probe.language_exists || !probe.search_vector_exists);
+    // v0.27.1: idx_chunks_embedding_image references this column.
+    const needsChunksEmbeddingImage = probe.chunks_exists && !probe.embedding_image_exists;
     // v0.26.5: pages_deleted_at_purge_idx in SCHEMA_SQL crashes if the column
     // doesn't exist yet. Migration v34 also adds it, but bootstrap runs first.
     const needsPagesDeletedAt = probe.pages_exists && !probe.deleted_at_exists;
+    // v0.29: CREATE TABLE IF NOT EXISTS does not add current table columns to
+    // old brains, but current code reads/writes emotional_weight after schema replay.
+    const needsPagesEmotionalWeight = probe.pages_exists && !probe.emotional_weight_exists;
+    // v0.29.1: pages_coalesce_date_idx in SCHEMA_SQL references effective_date
+    // before numbered migrations can add it on old brains.
+    const needsPagesRecencyColumns = probe.pages_exists && !probe.effective_date_exists;
     // v0.26.3 (v33): idx_mcp_log_agent_time in SCHEMA_SQL needs agent_name col.
     const needsMcpLogBootstrap = probe.mcp_log_exists && !probe.agent_name_exists;
     // v0.27 (v36): idx_subagent_messages_provider in SCHEMA_SQL needs provider_id
     // (the SECOND column in the composite index `(job_id, provider_id)`).
     const needsSubagentProviderId = probe.subagent_messages_exists && !probe.subagent_provider_id_exists;
 
-    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId) return;
+    if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
+        && !needsPagesDeletedAt && !needsPagesEmotionalWeight && !needsPagesRecencyColumns
+        && !needsChunksEmbeddingImage && !needsMcpLogBootstrap && !needsSubagentProviderId) return;
 
     console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
 
@@ -349,6 +373,34 @@ export class PostgresEngine implements BrainEngine {
       // not to crash. v34 runs later via runMigrations and is idempotent.
       await conn.unsafe(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsPagesEmotionalWeight) {
+      // v40 (pages_emotional_weight) also adds this. Bootstrap gets old tables
+      // into a shape where the latest embedded schema can safely replay.
+      await conn.unsafe(`
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight REAL NOT NULL DEFAULT 0.0;
+      `);
+    }
+
+    if (needsPagesRecencyColumns) {
+      // v41 (pages_recency_columns) also adds these. Bootstrap creates only
+      // the columns so SCHEMA_SQL's expression index can be created safely.
+      await conn.unsafe(`
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date        TIMESTAMPTZ;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date_source TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS import_filename       TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS salience_touched_at   TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsChunksEmbeddingImage) {
+      // v39 (multimodal_dual_column_v0_27_1) also adds these. Bootstrap
+      // creates the columns so SCHEMA_SQL's HNSW image index can replay.
+      await conn.unsafe(`
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS modality TEXT NOT NULL DEFAULT 'text';
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_image vector(1024);
       `);
     }
 

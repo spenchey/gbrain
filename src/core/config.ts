@@ -134,6 +134,12 @@ export function loadConfig(): GBrainConfig | null {
 
   if (!fileConfig && !dbUrl) return null;
 
+  const providerBaseUrls = {
+    ...(fileConfig?.provider_base_urls ?? {}),
+    ...(process.env.OLLAMA_BASE_URL ? { ollama: process.env.OLLAMA_BASE_URL } : {}),
+    ...(process.env.LITELLM_BASE_URL ? { litellm: process.env.LITELLM_BASE_URL } : {}),
+  };
+
   // Infer engine type if not explicitly set
   const inferredEngine: 'postgres' | 'pglite' = fileConfig?.engine
     || (fileConfig?.database_path ? 'pglite' : 'postgres');
@@ -146,6 +152,7 @@ export function loadConfig(): GBrainConfig | null {
     ...(process.env.OPENAI_API_KEY ? { openai_api_key: process.env.OPENAI_API_KEY } : {}),
     ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
     ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
+    ...(Object.keys(providerBaseUrls).length ? { provider_base_urls: providerBaseUrls } : {}),
     ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
     ...(process.env.GBRAIN_CHAT_MODEL ? { chat_model: process.env.GBRAIN_CHAT_MODEL } : {}),
     ...(process.env.GBRAIN_CHAT_FALLBACK_CHAIN

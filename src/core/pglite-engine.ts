@@ -255,6 +255,10 @@ export class PGLiteEngine implements BrainEngine {
                 WHERE table_schema='public' AND table_name='pages' AND column_name='source_id') AS source_id_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='deleted_at') AS deleted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='emotional_weight') AS emotional_weight_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='effective_date') AS effective_date_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='links') AS links_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
@@ -284,6 +288,8 @@ export class PGLiteEngine implements BrainEngine {
       pages_exists: boolean;
       source_id_exists: boolean;
       deleted_at_exists: boolean;
+      emotional_weight_exists: boolean;
+      effective_date_exists: boolean;
       links_exists: boolean;
       link_source_exists: boolean;
       origin_page_id_exists: boolean;
@@ -304,6 +310,12 @@ export class PGLiteEngine implements BrainEngine {
     const needsChunksBootstrap = probe.chunks_exists
       && (!probe.symbol_name_exists || !probe.language_exists || !probe.search_vector_exists);
     const needsPagesDeletedAt = probe.pages_exists && !probe.deleted_at_exists;
+    // v0.29: current pages table includes emotional_weight, but CREATE TABLE
+    // IF NOT EXISTS does not add it to old brains.
+    const needsPagesEmotionalWeight = probe.pages_exists && !probe.emotional_weight_exists;
+    // v0.29.1: pages_coalesce_date_idx references effective_date before
+    // numbered migrations can add it on old brains.
+    const needsPagesRecencyColumns = probe.pages_exists && !probe.effective_date_exists;
     // v0.27.1 — partial HNSW idx_chunks_embedding_image references this column.
     const needsChunksEmbeddingImage = probe.chunks_exists && !probe.embedding_image_exists;
     // v0.26.3 (v33): idx_mcp_log_agent_time in PGLITE_SCHEMA_SQL needs agent_name col.
@@ -314,7 +326,8 @@ export class PGLiteEngine implements BrainEngine {
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
-        && !needsPagesDeletedAt && !needsChunksEmbeddingImage
+        && !needsPagesDeletedAt && !needsPagesEmotionalWeight && !needsPagesRecencyColumns
+        && !needsChunksEmbeddingImage
         && !needsMcpLogBootstrap && !needsSubagentProviderId) return;
 
     console.log('  Pre-v0.21 brain detected, applying forward-reference bootstrap');
@@ -376,6 +389,25 @@ export class PGLiteEngine implements BrainEngine {
       // not to crash. v34 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsPagesEmotionalWeight) {
+      // v40 (pages_emotional_weight) also adds this. Bootstrap gets old tables
+      // into a shape where the latest embedded schema can safely replay.
+      await this.db.exec(`
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight REAL NOT NULL DEFAULT 0.0;
+      `);
+    }
+
+    if (needsPagesRecencyColumns) {
+      // v41 (pages_recency_columns) also adds these. Bootstrap creates only
+      // the columns so PGLITE_SCHEMA_SQL's expression index can be created safely.
+      await this.db.exec(`
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date        TIMESTAMPTZ;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date_source TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS import_filename       TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS salience_touched_at   TIMESTAMPTZ;
       `);
     }
 
