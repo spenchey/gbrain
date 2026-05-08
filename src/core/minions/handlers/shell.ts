@@ -35,7 +35,7 @@ import { UnrecoverableError } from '../types.ts';
 /** Environment variables passed through to shell children by default. Callers
  *  that need additional keys (e.g. a specific API token for a cron) must name
  *  them explicitly in `job.data.env`. Named keys override this allowlist. */
-const SHELL_ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LANG', 'TZ', 'NODE_ENV'] as const;
+const SHELL_ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LANG', 'TZ', 'NODE_ENV', 'GH_TOKEN', 'GITHUB_TOKEN'] as const;
 
 /** Max bytes retained from stdout/stderr. Output exceeding these caps is
  *  truncated with a `[truncated N bytes]` marker. UTF-8-safe via StringDecoder. */
