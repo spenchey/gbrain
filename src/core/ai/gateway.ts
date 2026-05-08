@@ -369,11 +369,60 @@ export async function embed(texts: string[]): Promise<Float32Array[]> {
   const allEmbeddings: Float32Array[] = [];
 
   for (const batch of batches) {
-    const result = await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId);
+    const result = recipe.id === 'ollama'
+      ? await embedOllamaSubBatch(batch, cfg, recipe, modelId, expected)
+      : await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId);
     allEmbeddings.push(...result);
   }
 
   return allEmbeddings;
+}
+
+async function embedOllamaSubBatch(
+  texts: string[],
+  cfg: AIGatewayConfig,
+  recipe: Recipe,
+  modelId: string,
+  expectedDims: number,
+): Promise<Float32Array[]> {
+  const baseUrl = cfg.base_urls?.[recipe.id] ?? recipe.base_url_default;
+  const url = `${baseUrl.replace(/\/$/, '')}/embeddings`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: modelId, input: texts }),
+    });
+  } catch (e) {
+    throw new AIConfigError(
+      `Ollama embedding request could not reach ${url}: ${e instanceof Error ? e.message : String(e)}`,
+      recipe.setup_hint,
+    );
+  }
+  if (!res.ok) {
+    throw new AIConfigError(
+      `Ollama embedding request failed (${res.status}): ${(await res.text()).slice(0, 300)}`,
+      recipe.setup_hint,
+    );
+  }
+  const body = await res.json() as { data?: Array<{ embedding?: number[] }> };
+  const vectors = body.data?.map((item) => item.embedding).filter(Boolean) as number[][] | undefined;
+  if (!vectors || vectors.length !== texts.length) {
+    throw new AIConfigError(
+      `Ollama embedding returned unexpected payload shape.`,
+      recipe.setup_hint,
+    );
+  }
+  const first = vectors[0];
+  if (first && first.length !== expectedDims) {
+    throw new AIConfigError(
+      `Embedding dim mismatch: model ${modelId} returned ${first.length} but schema expects ${expectedDims}.`,
+      `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${first.length}\` or change models.`,
+    );
+  }
+  recordSubBatchSuccess(recipe);
+  return vectors.map((e) => new Float32Array(e));
 }
 
 /**
