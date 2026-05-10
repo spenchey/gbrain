@@ -277,6 +277,7 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   // past the 30s worker cleanup race.
   let killTimer: ReturnType<typeof setTimeout> | null = null;
   let killReason = '';
+  let exited = false;
   const onAbort = (label: string) => () => {
     if (killTimer !== null) return; // already started
     killReason = label;
@@ -284,7 +285,7 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
       try { proc.kill('SIGTERM'); } catch { /* proc already exited */ }
     }
     killTimer = setTimeout(() => {
-      if (!proc.killed) {
+      if (!exited) {
         try { proc.kill('SIGKILL'); } catch { /* already exited */ }
       }
     }, KILL_GRACE_MS);
@@ -303,6 +304,7 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
       reject(err);
     });
     proc.on('exit', (code, signal) => {
+      exited = true;
       // Node maps signal-terminated exits to a 128+N code convention; we use
       // whichever is defined.
       if (code !== null) resolve(code);
