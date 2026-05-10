@@ -105,6 +105,13 @@ function readQuietHoursConfig(job: MinionJob): QuietHoursConfig | null {
   return cfg as unknown as QuietHoursConfig;
 }
 
+function positiveEnvNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 /** Per-job in-flight state (isolated per job, not shared on the worker). */
 interface InFlightJob {
   job: MinionJob;
@@ -153,7 +160,7 @@ export class MinionWorker extends EventEmitter {
     this.opts = {
       queue: opts?.queue ?? 'default',
       concurrency: opts?.concurrency ?? 1,
-      lockDuration: opts?.lockDuration ?? 30000,
+      lockDuration: opts?.lockDuration ?? positiveEnvNumber('GBRAIN_WORKER_LOCK_DURATION_MS', 30000),
       stalledInterval: opts?.stalledInterval ?? 30000,
       maxStalledCount: opts?.maxStalledCount ?? 1,
       pollInterval: opts?.pollInterval ?? (Number(process.env.GBRAIN_MINION_POLL_INTERVAL_MS) || 5000),
