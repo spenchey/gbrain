@@ -1,5 +1,165 @@
 # TODOS
 
+## Embedding-provider follow-ups (v0.32.0)
+
+- [ ] **v0.32.x: Vertex AI ADC embedding provider (#729 originally).** lucha0404
+  prototyped this with single-source-JSON via `GOOGLE_APPLICATION_CREDENTIALS`.
+  Real ADC is the full chain (metadata server, gcloud creds, service-account
+  JSON). The recipe needs to either use `@ai-sdk/google-vertex` (one new
+  dep, native fit) or implement the chain via Bun.crypto.subtle for RS256
+  JWT signing (zero dep, ~150 lines + RS256 spike). Original Q3 chose
+  zero-dep; revisit the dep budget when scoping.
+
+- [ ] **v0.32.x: GitHub Copilot embeddings (#691 originally).** tonyxu-io
+  proposed adding Copilot's Metis embedding endpoint as a sidecar recipe.
+  Codex review caught that this is not a recipe-add — it's an outbound OAuth
+  product surface (login flow, browser/device flow, refresh, UX). Needs its
+  own design pass: where does the token live? `~/.gbrain/oauth/copilot.json`
+  mode 0600 was the v0.32 plan; revisit + write `gbrain auth login copilot`.
+
+- [ ] **v0.32.x: OpenAI Codex OAuth chat provider (#698 originally).** perlantir
+  proposed a chat-only provider that reuses ChatGPT subscription auth instead
+  of API keys. Same OAuth-product-surface argument as #691. Same shared
+  infra: `~/.gbrain/oauth/<provider>.json` + `gbrain auth login <provider>`.
+  Build alongside #691 in one OAuth-subsystem wave.
+
+- [ ] **v0.32.x: CJK PGLite keyword fallback (#765 extracted).** 313094319-sudo
+  hit a real gap: PGLite's FTS doesn't tokenize CJK well, so Chinese queries
+  return empty results even with proper embeddings. Their PR added a
+  hasCJK detection branch in `searchKeyword` that switches to LIKE-based
+  fuzzy matching with a custom scoring function. ~150 lines of new SQL +
+  scoring + tests. Worth its own focused PR rather than folded into the
+  v0.32 wave's adjacent-fix lane. Extract `extractSearchTokens`,
+  `normalizeSearchText`, `hasCJK` helpers + the CJK branch in
+  `pglite-engine.ts:searchKeyword`. Includes tests for romaji + Korean
+  Hangul + traditional/simplified Chinese.
+
+- [ ] **v0.32.x: interactive provider chooser in `gbrain init`.** The full
+  wizard piece of the v0.32 discoverability lane was deferred. Today
+  `gbrain init` (no flags, TTY) silently uses OpenAI default. Plan: hook
+  into `init.ts:resolveAIOptions`, when no `--model` AND TTY AND not
+  `--non-interactive`, call `runExplain([])` (non-JSON path) from
+  `providers.ts:233-350` to print the provider matrix, then prompt with
+  readline (mirror `supabaseWizard()` at `init.ts:108`). Suggest
+  recommended based on env detection. Refuse `user_provided_models`
+  shorthand (already done in v0.32.0). Tests:
+  `test/init-provider-wizard.test.ts` (TTY → prompt fires; non-TTY →
+  falls through; invalid choice → re-prompts).
+
+- [ ] **v0.32.x: real-credentials per-recipe smoke-test CI matrix.** Codex
+  finding #6 noted that unit tests via `__setEmbedTransportForTests` prove
+  routing but not contract correctness with the actual provider HTTP
+  shape. Provider APIs change quietly (Voyage encoding-format, MiniMax
+  type field, Azure header). One real-call per recipe per month catches
+  drift before users do; <$1/run estimated. Requires API-key budget
+  approval + repo secrets.
+
+- [ ] **v0.32.x: MiniMax asymmetric retrieval support.** v0.32 ships
+  `embo-01` with `type: 'db'` for both indexing and queries (symmetric
+  retrieval). True asymmetric needs a query/document signal threaded
+  through the embed seam. Worth it for MiniMax users who care about
+  retrieval quality on Chinese content; defer until users complain.
+
+- [ ] **v0.32.x: un-hardcode the multimodal dispatch at gateway.ts:583.**
+  Currently `recipe.id !== 'voyage'` is hardcoded — harmless until a
+  second multimodal recipe lands. Make it table-driven via
+  `Recipe.touchpoints.embedding.supports_multimodal` +
+  `multimodal_models`. ~10 lines + a contract test.
+
+## v0.31.2 follow-ups
+
+### Investigate: `gbrain query <common-keyword>` infinite loop
+**Priority:** P1
+**Filed:** 2026-05-08 from v0.31.2 bug report (separate from the sync hang).
+
+**Evidence:** Two `bun /Users/garrytan/.bun/bin/gbrain query the` processes
+(PIDs 39429, 46624) on the user's Mac were pegged at 99% CPU for 7
+straight days before being killed manually. Each used 6+ GB resident
+memory. Originated from the `algiers-v3` worktree. Not walker-related
+(query path doesn't traverse files), so the v0.31.2 fix doesn't address
+it.
+
+**Likely candidates:**
+- Query-expansion regex catastrophic backtracking on common single words
+  (`src/core/search/expansion.ts` calls Haiku then post-processes with
+  regex; a one-token query plus an unhelpful expansion could feed a
+  pathological input back into the search pipeline)
+- Hybrid-search RRF reciprocal-rank-fusion loop iterating over a result
+  set that never shrinks (`src/core/search/hybrid.ts`)
+- `postgres.js` cursor that never closes when the result set is large
+  (the 6GB RES on `query` smells like accumulated rows in JS memory, not
+  WASM allocation)
+
+**To reproduce:** create a brain with at least a few thousand pages, run
+`gbrain query the` and watch CPU + RSS. If it pegs and grows, capture
+`process.report.getReport()` and a stack trace via `kill -SIGUSR2 <pid>`
+before killing.
+
+**Out of scope for v0.31.2** because the user's primary symptom (sync
+hang) was the higher-evidence bug. Pick this up as v0.31.3 once the
+sync fix is verified working in production.
+
+### v0.31.3: PGLite + Postgres E2E for amarillo-shape regression
+**Priority:** P2
+**Filed:** 2026-05-08 from v0.31.2 plan (deferred).
+
+**What:** Plan called for two regression tests pinning the user's exact
+repro topology: `test/sync-walker-amarillo-shape.test.ts` (PGLite,
+fast-loop) and `test/e2e/sync-amarillo-shape.test.ts` (real-Postgres,
+skip-on-no-DB). Unit-level walker + chunker tests landed in v0.31.2
+(`test/sync-walker-symlink.test.ts` + `test/chunker-timeout.test.ts`),
+but the engine-integrated regression for the user's exact 1500-file
+self-symlink topology is still pending. Add when the next sync-related
+PR is in flight.
+
+## Thin-client mode follow-ups (v0.31.1, Issue #734)
+
+- [ ] **v0.31.x: routed-call timing telemetry.** `GBRAIN_TIMING=1` prints
+  `token_mint=Xms http=Yms server=Zms total=Wms` per routed MCP call.
+  Audit log at `~/.gbrain/audit/routed-calls-YYYY-Www.jsonl`. Cherry-pick
+  C from #734 plan; deferred from v0.31.1 to keep scope tight.
+
+- [ ] **v0.31.2: job-submission routing for `gbrain dream` etc.** Route
+  long-running ops (`dream`, `embed --stale`, `extract`) via `submit_job`
+  + poll, mirroring the existing `gbrain remote ping` autopilot-cycle
+  pattern. Cherry-pick D from #734 plan. Adds a thin-client async-job
+  render layer (progress events + spinner).
+
+- [ ] **Per-subcommand thin-client routing for `takes` and `sources`.**
+  CDX-2 audit identified the READ subcommands (`takes_list`, `takes_search`,
+  `sources_list`, `sources_status`) as routable; mutate subcommands edit
+  local files. v0.31.1 refuses both at the top level with hints. Split
+  is a v0.31.x release.
+
+- [ ] **Privacy decision: lift `localOnly: true` on `get_recent_transcripts`?**
+  Raw chat exports leaving the host is a real tradeoff. Needs explicit
+  per-token scope (`scope: 'transcripts'`) and consent UX. Out of v0.31.1.
+
+- [ ] **Trust-boundary policy review for remote-caller gates.** Server
+  intentionally disables `think.--save`/`--take` for remote callers
+  (operations.ts:1103-1135) and skips `put_page` auto-link/auto-timeline
+  for remote callers without `trustedWorkspace` (operations.ts:434-451).
+  Subagent-isolation reasons; blocks full thin-client parity. Policy
+  decision, not a routing fix.
+
+- [ ] **v0.32.0: flip `gbrain auth register-client` default scope from
+  `read` to `read,write,admin`.** Breaking for existing read-only scrapers;
+  ship deprecation warning in v0.31.x. The v0.31.1 `oauth_client_scopes_probe`
+  doctor check surfaces the gap with pinpoint remediation in the meantime.
+
+- [ ] **v0.31.x: cross-process OAuth token cache at
+  `~/.gbrain/oauth-token-cache.json`.** Cuts ~200ms cold-start cost for
+  shell-loop usage on thin-client installs. Today the in-memory cache is
+  per-process; every `gbrain` invocation pays a fresh token mint.
+
+- [ ] **v0.31.x: parity test (`test/thin-client-parity.test.ts`).** Plan
+  called for ~400 LOC byte-equal stdout assertions for 12+ ops via an
+  in-process MCP server pointed at the same PGLite as the local-engine
+  path. Harder than expected because it needs MCP server setup that the
+  current test infrastructure doesn't expose. v0.31.1 ships without it;
+  ENG-2's JSON-shape normalization + per-command test coverage is the
+  interim guard.
+
 ## LongMemEval benchmark follow-ups (v0.28.12)
 
 ### Closed: full 500-question 4-adapter run published
@@ -1611,3 +1771,35 @@ doesn't gate on scopes. Adding per-tool scope enforcement would let
 **Effort estimate:** M (human: ~1 day / CC: ~30 min for the schema-aware gate).
 **Priority:** P3.
 **Depends on:** Nothing.
+
+---
+
+### `@garrytan/gbrain` scoped-name npm publishing
+**What:** Publish gbrain to npm under the scoped name `@garrytan/gbrain`
+instead of the bare `gbrain` name. Provides structural defense against the
+unrelated `gbrain@1.x` squatter package on npm.
+
+**Why:** `classifyBunInstall()` at `src/commands/upgrade.ts:395` does a
+best-effort fingerprint check on `repository.url` + `src/cli.ts` marker, with
+the comment explicitly accepting that signals are spoofable by a determined
+squatter. Scoped publishing is the structural answer that closes the loop:
+`bun add -g @garrytan/gbrain` cannot collide with any non-`@garrytan` package.
+
+**Pros:** closes the squatter vector; consistent with how high-trust npm
+packages are published; allows removing `classifyBunInstall`'s spoofable
+signals later.
+
+**Cons:** multi-week effort; needs reverse-compatible upgrade path for users
+on the bare-name install (`bun add -g gbrain` → recovery message pointing
+at the new scoped name); npm publishing flow changes; CI publish step needs
+scope-aware tagging.
+
+**Context:** tracked at `src/commands/upgrade.ts:392-394` since v0.29; reaffirmed
+during v0.31.8 codex outside-voice review. Issue #658 has the surface-level
+history.
+
+**Effort estimate:** L (human: ~1 week / CC: ~half a day for the publishing
+flow + recovery messaging).
+**Priority:** P2.
+**Depends on:** decision on whether to deprecate the bare name or dual-publish
+during a transition window.

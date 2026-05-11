@@ -37,7 +37,7 @@ export interface GBrainConfig {
   expansion_model?: string;
   /**
    * Default chat model for `gateway.chat()` callers (v0.27+).
-   * Default: "anthropic:claude-sonnet-4-6-20250929".
+   * Default: "anthropic:claude-sonnet-4-6" (dateless per Anthropic's v0.31.12+ model-ID format).
    */
   chat_model?: string;
   /**
@@ -140,16 +140,24 @@ export function loadConfig(): GBrainConfig | null {
     ...(process.env.LITELLM_BASE_URL ? { litellm: process.env.LITELLM_BASE_URL } : {}),
   };
 
-  // Infer engine type if not explicitly set
-  const inferredEngine: 'postgres' | 'pglite' = fileConfig?.engine
-    || (fileConfig?.database_path ? 'pglite' : 'postgres');
+  // Infer engine type. A DATABASE_URL-style env var is always a Postgres
+  // connection target and must override a file-backed PGLite engine
+  // selection; otherwise direct-script / operator paths can silently hit
+  // the local PGLite brain while claiming to use the env URL. The PGLite
+  // database_path is also cleared when dbUrl is set so toEngineConfig
+  // doesn't pass a stale path through alongside the URL.
+  const inferredEngine: 'postgres' | 'pglite' = dbUrl
+    ? 'postgres'
+    : fileConfig?.engine || (fileConfig?.database_path ? 'pglite' : 'postgres');
 
   // Merge: env vars override config file. READ only — never mutate process.env.
   const merged = {
     ...fileConfig,
     engine: inferredEngine,
     ...(dbUrl ? { database_url: dbUrl } : {}),
+    ...(dbUrl ? { database_path: undefined } : {}),
     ...(process.env.OPENAI_API_KEY ? { openai_api_key: process.env.OPENAI_API_KEY } : {}),
+    ...(process.env.ANTHROPIC_API_KEY ? { anthropic_api_key: process.env.ANTHROPIC_API_KEY } : {}),
     ...(process.env.GBRAIN_EMBEDDING_MODEL ? { embedding_model: process.env.GBRAIN_EMBEDDING_MODEL } : {}),
     ...(process.env.GBRAIN_EMBEDDING_DIMENSIONS ? { embedding_dimensions: parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS, 10) } : {}),
     ...(Object.keys(providerBaseUrls).length ? { provider_base_urls: providerBaseUrls } : {}),

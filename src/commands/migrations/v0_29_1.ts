@@ -19,6 +19,7 @@
  */
 
 import { execSync } from 'child_process';
+import type { BrainEngine } from '../../core/engine.ts';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import { childGlobalFlags } from '../../core/cli-options.ts';
 
@@ -42,6 +43,7 @@ function phaseASchema(opts: OrchestratorOpts): OrchestratorPhaseResult {
 
 async function phaseBBackfill(opts: OrchestratorOpts): Promise<OrchestratorPhaseResult> {
   if (opts.dryRun) return { name: 'backfill_effective_date', status: 'skipped', detail: 'dry-run' };
+  let engine: BrainEngine | null = null;
   try {
     const { createEngine } = await import('../../core/engine-factory.ts');
     const { loadConfig, toEngineConfig } = await import('../../core/config.ts');
@@ -49,7 +51,7 @@ async function phaseBBackfill(opts: OrchestratorOpts): Promise<OrchestratorPhase
     const cfg = loadConfig();
     if (!cfg) throw new Error('No gbrain config; run `gbrain init` first.');
     const engineConfig = toEngineConfig(cfg);
-    const engine = await createEngine(engineConfig);
+    engine = await createEngine(engineConfig);
     await engine.connect(engineConfig);
 
     let totalExamined = 0;
@@ -76,6 +78,10 @@ async function phaseBBackfill(opts: OrchestratorOpts): Promise<OrchestratorPhase
     }
   } catch (e) {
     return { name: 'backfill_effective_date', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (engine) {
+      try { await engine.disconnect(); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -83,26 +89,22 @@ async function phaseBBackfill(opts: OrchestratorOpts): Promise<OrchestratorPhase
 
 async function phaseCVerify(opts: OrchestratorOpts): Promise<OrchestratorPhaseResult> {
   if (opts.dryRun) return { name: 'verify', status: 'skipped', detail: 'dry-run' };
+  let engine: BrainEngine | null = null;
   try {
     const { createEngine } = await import('../../core/engine-factory.ts');
     const { loadConfig, toEngineConfig } = await import('../../core/config.ts');
     const cfg = loadConfig();
     if (!cfg) throw new Error('No gbrain config; run `gbrain init` first.');
     const engineConfig = toEngineConfig(cfg);
-    const engine = await createEngine(engineConfig);
+    engine = await createEngine(engineConfig);
     await engine.connect(engineConfig);
-    let rows: { count: string }[];
-    try {
-      // Count rows where effective_date is still NULL but frontmatter HAS a
-      // parseable date — those are the rows the backfill should have touched
-      // but didn't. (Rows that fall through to 'fallback' have non-null
-      // effective_date already; this catches genuine misses.)
-      rows = await engine.executeRaw<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM pages WHERE effective_date IS NULL`,
-      );
-    } finally {
-      await engine.disconnect();
-    }
+    // Count rows where effective_date is still NULL but frontmatter HAS a
+    // parseable date — those are the rows the backfill should have touched
+    // but didn't. (Rows that fall through to 'fallback' have non-null
+    // effective_date already; this catches genuine misses.)
+    const rows = await engine.executeRaw<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM pages WHERE effective_date IS NULL`,
+    );
     const remaining = Number(rows[0]?.count ?? 0);
     if (remaining > 0) {
       return {
@@ -114,6 +116,10 @@ async function phaseCVerify(opts: OrchestratorOpts): Promise<OrchestratorPhaseRe
     return { name: 'verify', status: 'complete', detail: '0 pages with NULL effective_date' };
   } catch (e) {
     return { name: 'verify', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (engine) {
+      try { await engine.disconnect(); } catch { /* ignore */ }
+    }
   }
 }
 
