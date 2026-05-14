@@ -49,6 +49,21 @@ const STDERR_TAIL_MAX_BYTES = 16 * 1024;
  *  flush state, exit cleanly; non-behaving scripts get reaped. */
 const KILL_GRACE_MS = 5000;
 
+function killShellProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = proc.pid;
+  if (pid && pid > 0) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall through to killing the direct child. Some platforms or spawn
+      // failures may not have created the detached process group yet.
+    }
+  }
+
+  try { proc.kill(signal); } catch { /* already exited */ }
+}
+
 export interface ShellJobParams {
   /** Shell command. Spawned via `/bin/sh -c cmd`. Exactly one of cmd or argv is required. */
   cmd?: string;
@@ -249,6 +264,7 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
         cwd: params.cwd,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
       });
     } else {
       const argv = params.argv!;
@@ -256,6 +272,7 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
         cwd: params.cwd,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
       });
     }
   } catch (err) {
@@ -282,11 +299,11 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
     if (killTimer !== null) return; // already started
     killReason = label;
     if (!proc.killed) {
-      try { proc.kill('SIGTERM'); } catch { /* proc already exited */ }
+      killShellProcessGroup(proc, 'SIGTERM');
     }
     killTimer = setTimeout(() => {
       if (!exited) {
-        try { proc.kill('SIGKILL'); } catch { /* already exited */ }
+        killShellProcessGroup(proc, 'SIGKILL');
       }
     }, KILL_GRACE_MS);
   };
