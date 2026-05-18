@@ -150,6 +150,7 @@ export class MinionSupervisor {
   private sigintListener: (() => void) | null = null;
   private lockAcquired = false;
   private consecutiveHealthFailures = 0;
+  private lastHealthRestartAt = 0;
 
   constructor(engine: BrainEngine, opts: Partial<SupervisorOpts> & { cliPath: string }) {
     this.engine = engine;
@@ -574,11 +575,13 @@ export class MinionSupervisor {
       // queue.ts:848 handleStalled() definition — same set that the queue
       // itself will requeue/dead-letter on next tick).
       const rows = await this.engine.executeRaw<{
+        active: string;
         stalled: string;
         waiting: string;
         last_completed: string | null;
       }>(
         `SELECT
+           count(*) FILTER (WHERE status = 'active')::text AS active,
            count(*) FILTER (WHERE status = 'active' AND lock_until < now())::text AS stalled,
            count(*) FILTER (WHERE status = 'waiting')::text AS waiting,
            max(updated_at) FILTER (WHERE status = 'completed')::text AS last_completed
@@ -590,7 +593,8 @@ export class MinionSupervisor {
       // Reset consecutive failure counter on successful health check
       this.consecutiveHealthFailures = 0;
 
-      const row = rows[0] ?? { stalled: '0', waiting: '0', last_completed: null };
+      const row = rows[0] ?? { active: '0', stalled: '0', waiting: '0', last_completed: null };
+      const activeCount = parseInt(row.active ?? '0', 10);
       const stalledCount = parseInt(row.stalled ?? '0', 10);
       const waitingCount = parseInt(row.waiting ?? '0', 10);
       const lastCompleted = row.last_completed ? new Date(row.last_completed) : null;
@@ -613,9 +617,38 @@ export class MinionSupervisor {
         this.emit('health_warn', {
           reason: 'no_recent_completions',
           waiting_count: waitingCount,
+          active_count: activeCount,
           minutes_since_completion: minutesSinceCompletion,
           queue: this.opts.queue,
         });
+
+        const workerAlive = this.child != null && this.child.exitCode === null;
+        const restartCooldownMs = 5 * 60 * 1000;
+        const restartDue = now - this.lastHealthRestartAt > restartCooldownMs;
+        if (activeCount === 0 && workerAlive && !this.stopping && restartDue) {
+          this.lastHealthRestartAt = now;
+          this.emit('health_warn', {
+            reason: 'restarting_worker_no_recent_completions',
+            waiting_count: waitingCount,
+            active_count: activeCount,
+            minutes_since_completion: minutesSinceCompletion,
+            queue: this.opts.queue,
+          });
+          try {
+            this.child?.kill('SIGTERM');
+            setTimeout(() => {
+              if (this.child && this.child.exitCode === null) {
+                try { this.child.kill('SIGKILL'); } catch { /* already dead */ }
+              }
+            }, 30_000).unref?.();
+          } catch (killErr) {
+            this.emit('health_error', {
+              reason: 'worker_restart_signal_failed',
+              error: killErr instanceof Error ? killErr.message : String(killErr),
+              queue: this.opts.queue,
+            });
+          }
+        }
       }
 
       // F4: suppress "worker not alive" warn while we're in the expected

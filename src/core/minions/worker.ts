@@ -263,6 +263,11 @@ export class MinionWorker extends EventEmitter {
         if (healthRunning || !this.running || healthExited) return;
         healthRunning = true;
         try {
+          if (this.inFlight.size > 0) {
+            consecutiveDbFailures = 0;
+            return;
+          }
+
           // --- 1. DB liveness probe ---
           try {
             await probeWithTimeout();

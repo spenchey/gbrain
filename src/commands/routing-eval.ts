@@ -172,11 +172,11 @@ export async function runRoutingEvalCli(args: string[]): Promise<void> {
   const resolverContent = allResolverPaths
     .map(p => readFileSync(p, 'utf-8'))
     .join('\n\n');
-  const index = indexResolverTriggers(resolverContent);
+  const index = indexResolverTriggers(resolverContent, skillsDir);
 
   const loaded = loadRoutingFixtures(skillsDir);
   const lintIssues = lintRoutingFixtures(loaded.fixtures, index);
-  const report = runRoutingEval(resolverContent, loaded.fixtures, { llm: flags.llm });
+  const report = runRoutingEval(resolverContent, loaded.fixtures, { llm: flags.llm, skillsDir });
 
   const cleanFixtures = lintIssues.length === 0;
   const cleanResults =

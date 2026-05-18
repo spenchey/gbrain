@@ -11,7 +11,8 @@
  */
 
 import { readFileSync, existsSync, readdirSync } from 'fs';
-import { join, relative } from 'path';
+import { homedir } from 'os';
+import { isAbsolute, join, relative, resolve } from 'path';
 import { findResolverFile, findAllResolverFiles, RESOLVER_FILENAMES_LABEL } from './resolver-filenames.ts';
 import { loadOrDeriveManifest } from './skill-manifest.ts';
 import {
@@ -105,17 +106,77 @@ const OVERLAP_WHITELIST = new Set([
   'ingest',           // router that delegates to idea-ingest, media-ingest, meeting-ingestion
   'signal-detector',  // always-on, fires on every message
   'brain-ops',        // always-on, every brain read/write
+  'maintain',         // broad maintenance surface; focused fixers win specific routes
 ]);
 
-interface ResolverEntry {
+export interface ResolverEntry {
   trigger: string;
   skillPath: string;       // e.g., 'skills/query/SKILL.md'
   isGStack: boolean;       // GStack: X entries (external, skip file check)
   section: string;         // e.g., 'Brain operations'
 }
 
+function normalizeResolverSkillPath(rawPath: string, skillsDir?: string): { skillPath: string; isExternal: boolean } | null {
+  const path = rawPath.trim();
+  if (!path.endsWith('/SKILL.md')) return null;
+
+  if (path.startsWith('skills/')) {
+    return { skillPath: path, isExternal: false };
+  }
+
+  if (!skillsDir) {
+    return { skillPath: path, isExternal: true };
+  }
+
+  let absolutePath: string | null = null;
+  if (path.startsWith('~/')) {
+    absolutePath = join(homedir(), path.slice(2));
+  } else if (isAbsolute(path)) {
+    absolutePath = path;
+  }
+
+  if (!absolutePath) {
+    return { skillPath: path, isExternal: true };
+  }
+
+  const rel = relative(resolve(skillsDir), resolve(absolutePath));
+  if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
+    return { skillPath: `skills/${rel}`, isExternal: false };
+  }
+
+  return { skillPath: path, isExternal: true };
+}
+
+function splitMarkdownTableColumns(line: string): string[] {
+  const columns: string[] = [];
+  let current = '';
+  let inCode = false;
+  let escaped = false;
+
+  for (const ch of line) {
+    if (ch === '`' && !escaped) {
+      inCode = !inCode;
+      current += ch;
+    } else if (ch === '|' && !inCode && !escaped) {
+      columns.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+
+    if (escaped) {
+      escaped = false;
+    } else if (ch === '\\') {
+      escaped = true;
+    }
+  }
+
+  columns.push(current.trim());
+  return columns.filter(Boolean);
+}
+
 /** Parse RESOLVER.md markdown tables into structured entries. */
-export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
+export function parseResolverEntries(resolverContent: string, skillsDir?: string): ResolverEntry[] {
   const entries: ResolverEntry[] = [];
   let currentSection = '';
 
@@ -131,11 +192,11 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
     if (!line.startsWith('|') || line.includes('---')) continue;
 
     // Split table columns
-    const cols = line.split('|').map(c => c.trim()).filter(Boolean);
+    const cols = splitMarkdownTableColumns(line);
     if (cols.length < 2) continue;
 
     const trigger = cols[0];
-    const skillCol = cols[1];
+    const skillCol = cols[cols.length - 1];
 
     // Skip header rows
     if (trigger.toLowerCase() === 'trigger' || trigger.toLowerCase() === 'skill') continue;
@@ -146,10 +207,19 @@ export function parseResolverEntries(resolverContent: string): ResolverEntry[] {
       continue;
     }
 
-    // Extract skill path from backtick-wrapped references
-    const pathMatch = skillCol.match(/`(skills\/[^`]+\/SKILL\.md)`/);
-    if (pathMatch) {
-      entries.push({ trigger, skillPath: pathMatch[1], isGStack: false, section: currentSection });
+    // Extract skill paths from backtick-wrapped references. Support both
+    // 2-column `Trigger | Skill` tables and 3-column `Trigger | Mode | Go to`
+    // tables, plus OpenClaw-style absolute references to the active skills dir.
+    const pathMatches = [...skillCol.matchAll(/`([^`]+\/SKILL\.md)`/g)];
+    for (const match of pathMatches) {
+      const normalized = normalizeResolverSkillPath(match[1], skillsDir);
+      if (!normalized) continue;
+      entries.push({
+        trigger,
+        skillPath: normalized.skillPath,
+        isGStack: normalized.isExternal,
+        section: currentSection,
+      });
     }
   }
 
@@ -292,7 +362,7 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
   for (const rPath of allResolverPaths) {
     const content = readFileSync(rPath, 'utf-8');
     resolverContentParts.push(content);
-    for (const entry of parseResolverEntries(content)) {
+    for (const entry of parseResolverEntries(content, skillsDir)) {
       if (!seenSkillPaths.has(entry.skillPath)) {
         seenSkillPaths.add(entry.skillPath);
         entries.push(entry);
@@ -482,7 +552,7 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
   // will fail on them; default runs see them as informational.
   const loaded = loadRoutingFixtures(skillsDir);
   if (loaded.fixtures.length > 0) {
-    const triggerIndex = indexResolverTriggers(resolverContent);
+    const triggerIndex = indexResolverTriggers(resolverContent, skillsDir);
     const lintIssues = lintRoutingFixtures(loaded.fixtures, triggerIndex);
     for (const lint of lintIssues) {
       issues.push({
@@ -493,7 +563,7 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
         action: `Edit skills/<skill>/routing-eval.jsonl to fix: ${lint.detail}`,
       });
     }
-    const routingReport = runRoutingEval(resolverContent, loaded.fixtures);
+    const routingReport = runRoutingEval(resolverContent, loaded.fixtures, { skillsDir });
     for (const d of routingReport.details) {
       if (d.outcome === 'pass') continue;
       const kind =

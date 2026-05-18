@@ -120,6 +120,11 @@
       "description": "Skill validation framework: frontmatter, sections, manifest coverage, MECE checks."
     },
     {
+      "name": "motorinn-sana-creative",
+      "path": "motorinn-sana-creative/SKILL.md",
+      "description": "Route Motor Inn generated visual creative requests to Emily's SANA/ComfyUI workflow and store only selected asset metadata, prompt patterns, and decisions in brain."
+    },
+    {
       "name": "soul-audit",
       "path": "soul-audit/SKILL.md",
       "description": "6-phase interactive interview generating SOUL.md, USER.md, ACCESS_POLICY.md, HEARTBEAT.md."

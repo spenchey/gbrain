@@ -66,6 +66,38 @@ describe("parseResolverEntries", () => {
     expect(entries[0].section).toBe("Always-on");
     expect(entries[1].section).toBe("Brain operations");
   });
+
+  test("handles OpenClaw 3-column resolver rows with absolute local skill paths", () => {
+    const skillsDir = mkdtempSync(join(tmpdir(), "gbrain-resolver-openclaw-"));
+    try {
+      const content = `## Motor Inn
+| Intent trigger | Mode | Go to |
+|---|---|---|
+| "ingest google ads" | batch | \`${join(skillsDir, "gads-ingest", "SKILL.md")}\` -> \`~/gbrain/skills/ingest/SKILL.md\` |`;
+      const entries = parseResolverEntries(content, skillsDir);
+      expect(entries.length).toBe(2);
+      expect(entries[0].skillPath).toBe("skills/gads-ingest/SKILL.md");
+      expect(entries[0].isGStack).toBe(false);
+      expect(entries[1].isGStack).toBe(true);
+    } finally {
+      rmSync(skillsDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not split table columns on escaped pipes inside command examples", () => {
+    const skillsDir = mkdtempSync(join(tmpdir(), "gbrain-resolver-pipes-"));
+    try {
+      const content = `## Ingest
+| Intent trigger | Mode | Go to |
+|---|---|---|
+| "pull calendar" | batch | \`${join(skillsDir, "calendar-ingest", "SKILL.md")}\` -> \`calendar-ingest.sh pull <work\\|personal>\` |`;
+      const entries = parseResolverEntries(content, skillsDir);
+      expect(entries.length).toBe(1);
+      expect(entries[0].skillPath).toBe("skills/calendar-ingest/SKILL.md");
+    } finally {
+      rmSync(skillsDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("checkResolvable — real skills directory", () => {
@@ -288,4 +320,3 @@ function afterEachCleanup(fn: () => void) {
   const { afterEach } = require("bun:test");
   afterEach(fn);
 }
-

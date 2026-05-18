@@ -133,7 +133,7 @@ export function composeResolvers(
 
   const hostResolverPath = join(hostSkillsDir, 'RESOLVER.md');
   const hostContent = readFile(hostResolverPath);
-  const hostRawEntries = hostContent ? parseResolverEntries(hostContent) : [];
+  const hostRawEntries = hostContent ? parseResolverEntries(hostContent, hostSkillsDir) : [];
 
   // Host entries: fully qualified against the host skills dir.
   const hostEntries: ComposedResolverEntry[] = hostRawEntries.map(e => {
@@ -169,7 +169,7 @@ export function composeResolvers(
     const resolverPath = join(mountSkillsDir, 'RESOLVER.md');
     const content = readFile(resolverPath);
     if (!content) continue; // Mount without a RESOLVER.md contributes no routing entries. Not an error.
-    const rawEntries = parseResolverEntries(content);
+    const rawEntries = parseResolverEntries(content, mountSkillsDir);
     const composed: ComposedResolverEntry[] = rawEntries.map(e => {
       const isExternal = e.isGStack;
       const shortName = isExternal ? e.skillPath : skillNameFromRelPath(e.skillPath);

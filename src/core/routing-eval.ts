@@ -133,8 +133,8 @@ function skillSlugFromPath(skillPath: string): string | null {
   return m ? m[1] : null;
 }
 
-export function indexResolverTriggers(resolverContent: string): SkillTriggerIndex {
-  const entries = parseResolverEntries(resolverContent);
+export function indexResolverTriggers(resolverContent: string, skillsDir?: string): SkillTriggerIndex {
+  const entries = parseResolverEntries(resolverContent, skillsDir);
   const skillPhrases = new Map<string, string[]>();
   for (const e of entries) {
     if (e.isGStack) continue;
@@ -160,7 +160,7 @@ export interface StructuralMatchResult {
 
 /** Always-on skills routinely co-fire; a match that includes them
  *  alongside a specific target skill is NOT ambiguous. */
-const ALWAYS_ON_SKILLS = new Set(['signal-detector', 'brain-ops', 'ingest']);
+const ALWAYS_ON_SKILLS = new Set(['signal-detector', 'brain-ops', 'ingest', 'maintain']);
 
 export function structuralRouteMatch(
   intent: string,
@@ -319,6 +319,7 @@ export function loadRoutingFixtures(skillsDir: string): LoadResult {
 export interface RunRoutingEvalOptions {
   /** Reserved for Layer B (LLM tie-break). Not implemented in this release. */
   llm?: boolean;
+  skillsDir?: string;
 }
 
 export function runRoutingEval(
@@ -326,7 +327,7 @@ export function runRoutingEval(
   fixtures: RoutingFixture[],
   _opts: RunRoutingEvalOptions = {},
 ): RoutingReport {
-  const index = indexResolverTriggers(resolverContent);
+  const index = indexResolverTriggers(resolverContent, _opts.skillsDir);
   const details: RoutingCaseResult[] = [];
   let passed = 0;
   let missed = 0;
