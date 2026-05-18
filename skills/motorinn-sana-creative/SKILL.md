@@ -2,6 +2,14 @@
 name: motorinn-sana-creative
 version: 0.1.0
 description: "Route Motor Inn generated visual creative requests to Emily's SANA/ComfyUI workflow. Use for AI vehicle imagery, ad/social backgrounds, listing hero concepts, visual campaign variants, and generated design assets that should be linked back into brain context."
+triggers:
+  - motor inn generated visual creative
+  - ai vehicle imagery
+  - ad background
+  - social creative background
+  - listing hero concept
+  - visual campaign variant
+  - generated design asset
 ---
 # Motor Inn SANA Creative
 
