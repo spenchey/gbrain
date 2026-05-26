@@ -29,6 +29,8 @@ import {
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
+import { isRetryableConnError } from '../core/retry-matcher.ts';
+import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -36,6 +38,47 @@ import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
 // count but safe at any future schema width and keeps per-batch error blast radius
 // small (a malformed row aborts at most 100, not thousands).
 const BATCH_SIZE = 100;
+
+// v0.41.2.1 — batch-flush retry primitive (closes PR #1416's ~30% batch-loss
+// bug). PgBouncer transaction-mode poolers recycle backend connections between
+// queries; the next query through a stale handle throws a retryable connection
+// error. Single 500ms-delay retry catches the recycle without amplifying real
+// outages (second failure propagates). Non-retryable errors (constraint
+// violations, etc.) propagate immediately so log-and-continue semantics are
+// preserved.
+//
+// Pure primitive: callers compose `onRetry` for stderr UI; retry classification
+// uses the canonical `isRetryableConnError` from src/core/retry-matcher.ts so
+// PgBouncer/auth-race/tcp-reset shapes don't drift across the codebase.
+
+export interface WithRetryOpts {
+  onRetry?: (attempt: number, err: unknown) => void;
+  delayMs?: number; // default 500
+}
+
+export async function withRetry<T>(fn: () => Promise<T>, opts: WithRetryOpts = {}): Promise<T> {
+  try {
+    return await fn();
+  } catch (firstErr) {
+    if (!isRetryableConnError(firstErr)) throw firstErr;
+    opts.onRetry?.(1, firstErr);
+    await new Promise((r) => setTimeout(r, opts.delayMs ?? 500));
+    return await fn(); // single retry — second failure propagates
+  }
+}
+
+export function logBatchRetry(
+  label: string,
+  snapshotLen: number,
+  err: unknown,
+  jsonMode: boolean,
+): void {
+  if (jsonMode) return;
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(
+    `[${label}] connection blip, retrying ${snapshotLen} rows in 500ms (${msg})`,
+  );
+}
 
 // --- Types ---
 
@@ -77,7 +120,9 @@ export function walkMarkdownFiles(dir: string): { path: string; relPath: string 
       try {
         const st = lstatSync(full);
         if (st.isDirectory()) {
-          if (!pruneDir(entry)) continue;
+          // v0.37.7.0 #1169: pass parentDir so pruneDir can detect git
+          // submodule pointers (`.git` as a file inside the candidate).
+          if (!pruneDir(entry, d)) continue;
           walk(full);
         } else if (entry.endsWith('.md') && !entry.startsWith('_')) {
           const rel = relative(dir, full);
@@ -380,8 +425,13 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
   let brainDir = explicitDir ? args[dirIdx + 1] : '.';
   const sourceIdx = args.indexOf('--source');
   const source = (sourceIdx >= 0 && sourceIdx + 1 < args.length) ? args[sourceIdx + 1] : 'fs';
+  // v0.37.7.0 #1204: --source-id <id> scopes extraction to one brain
+  // source. Separate flag from --source (fs|db) which is the
+  // data-source axis. When unset, walks all sources together as today.
+  const sourceIdIdx = args.indexOf('--source-id');
+  const sourceIdFilter = (sourceIdIdx >= 0 && sourceIdIdx + 1 < args.length) ? args[sourceIdIdx + 1] : undefined;
   const typeIdx = args.indexOf('--type');
-  const typeFilter = (typeIdx >= 0 && typeIdx + 1 < args.length) ? (args[typeIdx + 1] as PageType) : undefined;
+  const typeFilter = (typeIdx >= 0 && typeIdx + 1 < args.length) ? (args[typeIdx + 1] as string) : undefined;
   const sinceIdx = args.indexOf('--since');
   const since = (sinceIdx >= 0 && sinceIdx + 1 < args.length) ? args[sinceIdx + 1] : undefined;
   const dryRun = args.includes('--dry-run');
@@ -390,6 +440,11 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
   // v0_13_0 migration orchestrator runs this once under the hood; users
   // opt in for subsequent runs.
   const includeFrontmatter = args.includes('--include-frontmatter');
+  // v0.42.0.0 Part B: --by-mention auto-link body-text entity mentions
+  // via the gazetteer pass. Mode dispatch — when set, run ONLY the
+  // mention pass (skip default link extract). DB-source only per D7;
+  // FS-source is rejected with a paste-ready fix-hint below.
+  const byMention = args.includes('--by-mention');
 
   // Validate --since upfront. Without this, an invalid date like
   // `--since yesterday` produces NaN which silently passes the filter check
@@ -404,13 +459,36 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
   }
 
   if (!subcommand || !['links', 'timeline', 'all'].includes(subcommand)) {
-    console.error('Usage: gbrain extract <links|timeline|all> [--source fs|db] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE]');
+    console.error('Usage: gbrain extract <links|timeline|all> [--source fs|db] [--source-id <id>] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE]');
     process.exit(1);
   }
 
   if (source !== 'fs' && source !== 'db') {
     console.error(`Invalid --source: ${source}. Must be 'fs' or 'db'.`);
     process.exit(1);
+  }
+
+  // v0.42.0.0 D7: --by-mention requires DB-source. Gazetteer construction
+  // needs the engine; mixing FS-walk with DB-gazetteer is incoherent
+  // (you'd scan files on disk for mentions of entities that may not exist
+  // in any synced page). Fail loud with a paste-ready fix-hint.
+  if (byMention && source === 'fs') {
+    console.error(
+      `--by-mention requires --source db (currently --source fs). The mention scanner ` +
+      `needs the engine to build the entity gazetteer. Re-run as:\n\n` +
+      `  gbrain extract ${subcommand} --by-mention --source db` +
+      (sourceIdFilter ? ` --source-id ${sourceIdFilter}` : '') +
+      (since ? ` --since ${since}` : '') +
+      (dryRun ? ' --dry-run' : '') + '\n',
+    );
+    process.exit(2);
+  }
+  if (byMention && subcommand === 'timeline') {
+    console.error(
+      `--by-mention is a links-pass only; it does not apply to timeline extraction. ` +
+      `Re-run as 'gbrain extract links --by-mention' or 'gbrain extract all --by-mention'.`,
+    );
+    process.exit(2);
   }
 
   // FS source needs a brain dir. When --dir wasn't passed, resolve from
@@ -444,15 +522,27 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
       // is fs-only; we keep the dual codepath here so Minions handlers
       // can opt in via mode + source.
       result = { links_created: 0, timeline_entries_created: 0, pages_processed: 0 };
-      if (subcommand === 'links' || subcommand === 'all') {
-        const r = await extractLinksFromDB(engine, dryRun, jsonMode, typeFilter, since, { includeFrontmatter });
+      // v0.42.0.0: --by-mention is a mode dispatch. When set, run ONLY
+      // the mention pass and skip the default link/frontmatter extract.
+      // The two passes write different link_source values ('mentions' vs
+      // 'markdown'/'frontmatter') so they don't conflict, but mixing them
+      // in a single CLI invocation is surprising — keep the surfaces
+      // separate.
+      if (byMention) {
+        const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
         result.links_created = r.created;
         result.pages_processed = r.pages;
-      }
-      if (subcommand === 'timeline' || subcommand === 'all') {
-        const r = await extractTimelineFromDB(engine, dryRun, jsonMode, typeFilter, since);
-        result.timeline_entries_created = r.created;
-        result.pages_processed = Math.max(result.pages_processed, r.pages);
+      } else {
+        if (subcommand === 'links' || subcommand === 'all') {
+          const r = await extractLinksFromDB(engine, dryRun, jsonMode, typeFilter, since, { includeFrontmatter, sourceIdFilter });
+          result.links_created = r.created;
+          result.pages_processed = r.pages;
+        }
+        if (subcommand === 'timeline' || subcommand === 'all') {
+          const r = await extractTimelineFromDB(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
+          result.timeline_entries_created = r.created;
+          result.pages_processed = Math.max(result.pages_processed, r.pages);
+        }
       }
     } else {
       result = await runExtractCore(engine, {
@@ -511,25 +601,34 @@ async function extractForSlugs(
 
   async function flushLinks() {
     if (linkBatch.length === 0) return;
+    // Snapshot BEFORE clear so a producer pushing during the 500ms retry
+    // delay can't lose items on the second attempt. Error messages read
+    // snapshot.length (batch.length is 0 by the time the catch fires).
+    const snapshot = linkBatch.slice();
+    linkBatch.length = 0;
     try {
-      linksCreated += await engine.addLinksBatch(linkBatch); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+      linksCreated += await withRetry(
+        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+        { onRetry: (_a, err) => logBatchRetry('extract.links_inc', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (!jsonMode) console.error(`  link batch error (${linkBatch.length} rows lost): ${msg}`);
-    } finally {
-      linkBatch.length = 0;
+      if (!jsonMode) console.error(`  link batch error (${snapshot.length} rows lost): ${msg}`);
     }
   }
 
   async function flushTimeline() {
     if (timelineBatch.length === 0) return;
+    const snapshot = timelineBatch.slice();
+    timelineBatch.length = 0;
     try {
-      timelineCreated += await engine.addTimelineEntriesBatch(timelineBatch);
+      timelineCreated += await withRetry(
+        () => engine.addTimelineEntriesBatch(snapshot),
+        { onRetry: (_a, err) => logBatchRetry('extract.timeline_inc', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (!jsonMode) console.error(`  timeline batch error (${timelineBatch.length} rows lost): ${msg}`);
-    } finally {
-      timelineBatch.length = 0;
+      if (!jsonMode) console.error(`  timeline batch error (${snapshot.length} rows lost): ${msg}`);
     }
   }
 
@@ -606,17 +705,20 @@ async function extractLinksFromDir(
   const batch: LinkBatchInput[] = [];
   async function flush() {
     if (batch.length === 0) return;
+    const snapshot = batch.slice();
+    batch.length = 0;
     try {
-      created += await engine.addLinksBatch(batch); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+      created += await withRetry(
+        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+        { onRetry: (_a, err) => logBatchRetry('extract.links_fs', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
-        process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, error: msg }) + '\n');
+        process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
       } else {
-        console.error(`  batch error (${batch.length} link rows lost): ${msg}`);
+        console.error(`  batch error (${snapshot.length} link rows lost): ${msg}`);
       }
-    } finally {
-      batch.length = 0;
     }
   }
 
@@ -664,17 +766,20 @@ async function extractTimelineFromDir(
   const batch: TimelineBatchInput[] = [];
   async function flush() {
     if (batch.length === 0) return;
+    const snapshot = batch.slice();
+    batch.length = 0;
     try {
-      created += await engine.addTimelineEntriesBatch(batch);
+      created += await withRetry(
+        () => engine.addTimelineEntriesBatch(snapshot),
+        { onRetry: (_a, err) => logBatchRetry('extract.timeline_fs', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
-        process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, error: msg }) + '\n');
+        process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
       } else {
-        console.error(`  batch error (${batch.length} timeline rows lost): ${msg}`);
+        console.error(`  batch error (${snapshot.length} timeline rows lost): ${msg}`);
       }
-    } finally {
-      batch.length = 0;
     }
   }
 
@@ -775,9 +880,10 @@ async function extractLinksFromDB(
   jsonMode: boolean,
   typeFilter: PageType | undefined,
   since: string | undefined,
-  opts?: { includeFrontmatter?: boolean },
+  opts?: { includeFrontmatter?: boolean; sourceIdFilter?: string },
 ): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[] }> {
   const includeFrontmatter = opts?.includeFrontmatter ?? false;
+  const sourceIdFilter = opts?.sourceIdFilter;
   // Batch resolver: pg_trgm + exact only, NO search fallback. Dodges the
   // N-thousand API call trap on 46K-page brains. Resolver has a per-run
   // cache so duplicate names (same person appearing on many pages) resolve
@@ -791,12 +897,30 @@ async function extractLinksFromDB(
   // sourceId to getPage AND build a cross-source resolution map for link
   // disambiguation. Pre-fix used getAllSlugs() which collapsed
   // same-slug-different-source pages into one entry.
-  const allRefs = await engine.listAllPageRefs();
+  //
+  // v0.37.7.0 #1204: when --source-id <id> is passed, filter the walk
+  // to just that source so federated brain users can scope extraction
+  // explicitly. The resolution map still sees all sources so
+  // cross-source wikilinks (qualified like `[[other-src:slug]]`) can
+  // resolve — the filter is on WHICH pages we extract FROM, not what
+  // we can resolve TO.
+  const allRefs = sourceIdFilter
+    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
+    : await engine.listAllPageRefs();
+  const fullRefsForResolver = sourceIdFilter
+    ? await engine.listAllPageRefs()
+    : allRefs;
   // For backward-compat checks (`allSlugs.has(...)` calls below), we still
   // need a flat slug set. ALSO a per-slug → [sources] map for F10 resolution.
+  //
+  // v0.37.7.0: the resolver maps are built from `fullRefsForResolver`
+  // (not `allRefs`) so cross-source wikilinks resolve correctly even
+  // when --source-id scopes the extract walk. Without this, a scoped
+  // extract would fail to resolve qualified links to pages outside the
+  // scoped source.
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
-  for (const ref of allRefs) {
+  for (const ref of fullRefsForResolver) {
     allSlugs.add(ref.slug);
     const list = slugToSources.get(ref.slug) ?? [];
     list.push(ref.source_id);
@@ -813,17 +937,20 @@ async function extractLinksFromDB(
   const batch: LinkBatchInput[] = [];
   async function flush() {
     if (batch.length === 0) return;
+    const snapshot = batch.slice();
+    batch.length = 0;
     try {
-      created += await engine.addLinksBatch(batch); // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+      created += await withRetry(
+        () => engine.addLinksBatch(snapshot), // gbrain-allow-direct-insert: gbrain extract command — canonical link reconciliation from markdown body
+        { onRetry: (_a, err) => logBatchRetry('extract.links_db', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
-        process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, error: msg }) + '\n');
+        process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
       } else {
-        console.error(`  batch error (${batch.length} link rows lost): ${msg}`);
+        console.error(`  batch error (${snapshot.length} link rows lost): ${msg}`);
       }
-    } finally {
-      batch.length = 0;
     }
   }
 
@@ -944,11 +1071,18 @@ async function extractTimelineFromDB(
   jsonMode: boolean,
   typeFilter: PageType | undefined,
   since: string | undefined,
+  opts?: { sourceIdFilter?: string },
 ): Promise<{ created: number; pages: number }> {
   // v0.32.8: listAllPageRefs enumerates (slug, source_id) pairs so we can
   // thread sourceId to getPage and addTimelineEntriesBatch. Pre-fix used
   // getAllSlugs() which collapsed same-slug-different-source pages.
-  const allRefs = await engine.listAllPageRefs();
+  //
+  // v0.37.7.0 #1204: when sourceIdFilter is set, scope the walk to one
+  // source so federated brain users can extract per-source.
+  const sourceIdFilter = opts?.sourceIdFilter;
+  const allRefs = sourceIdFilter
+    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
+    : await engine.listAllPageRefs();
   let processed = 0, created = 0;
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
@@ -960,17 +1094,20 @@ async function extractTimelineFromDB(
   const batch: TimelineBatchInput[] = [];
   async function flush() {
     if (batch.length === 0) return;
+    const snapshot = batch.slice();
+    batch.length = 0;
     try {
-      created += await engine.addTimelineEntriesBatch(batch);
+      created += await withRetry(
+        () => engine.addTimelineEntriesBatch(snapshot),
+        { onRetry: (_a, err) => logBatchRetry('extract.timeline_db', snapshot.length, err, jsonMode) },
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (jsonMode) {
-        process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, error: msg }) + '\n');
+        process.stderr.write(JSON.stringify({ event: 'batch_error', size: snapshot.length, error: msg }) + '\n');
       } else {
-        console.error(`  batch error (${batch.length} timeline rows lost): ${msg}`);
+        console.error(`  batch error (${snapshot.length} timeline rows lost): ${msg}`);
       }
-    } finally {
-      batch.length = 0;
     }
   }
 
@@ -1017,6 +1154,134 @@ async function extractTimelineFromDB(
   if (!jsonMode) {
     const label = dryRun ? '(dry run) would create' : 'created';
     console.log(`Timeline: ${label} ${created} entries from ${processed} pages (db source)`);
+  }
+  return { created, pages: processed };
+}
+
+/**
+ * v0.42.0.0 Part B (migration #1 of #1409) — auto-link body-text entity
+ * mentions to known entity pages.
+ *
+ * Walks every page (respecting --source-id / --type / --since filters),
+ * scans `compiled_truth || '\n\n' || COALESCE(timeline, '')` per D3
+ * against the gazetteer built via `buildGazetteer`, and writes one link
+ * per (from_page, to_page) pair with `link_source='mentions'`. The
+ * mention link_source is filtered OUT of backlink-count per D12 so
+ * search ranking semantics are preserved.
+ *
+ * Source isolation: mentions cross-source pages are deliberately
+ * suppressed by `findMentionedEntities`'s cross-source guard. Page in
+ * source A mentions entity in source B → no link created. v1
+ * conservative posture; relaxable in a future wave.
+ */
+async function extractMentionsFromDb(
+  engine: BrainEngine,
+  dryRun: boolean,
+  jsonMode: boolean,
+  typeFilter: PageType | undefined,
+  since: string | undefined,
+  opts?: { sourceIdFilter?: string },
+): Promise<{ created: number; pages: number }> {
+  const sourceIdFilter = opts?.sourceIdFilter;
+
+  // Build gazetteer once per run. Skip everything if there are no
+  // linkable entities — vacuous truth, no mentions to find.
+  const gazetteer = await buildGazetteer(engine);
+  if (gazetteer.size === 0) {
+    if (jsonMode) {
+      process.stdout.write(JSON.stringify({ event: 'no_gazetteer', message: 'no linkable entity pages found; nothing to scan' }) + '\n');
+    } else {
+      console.log('No linkable entity pages found in this brain (need pages with type IN person/company/organization/entity).');
+    }
+    return { created: 0, pages: 0 };
+  }
+
+  const allRefs = sourceIdFilter
+    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
+    : await engine.listAllPageRefs();
+
+  let processed = 0;
+  let created = 0;
+  const batch: LinkBatchInput[] = [];
+
+  const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
+  progress.start('extract.by_mention.scan', allRefs.length);
+
+  async function flush() {
+    if (batch.length === 0) return;
+    try {
+      created += await engine.addLinksBatch(batch); // gbrain-allow-direct-insert: gbrain extract --by-mention — canonical auto-link write from body-text mention scan
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (jsonMode) {
+        process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, error: msg }) + '\n');
+      } else {
+        console.error(`  batch error (${batch.length} link rows lost): ${msg}`);
+      }
+    } finally {
+      batch.length = 0;
+    }
+  }
+
+  const sinceMs = since ? new Date(since).getTime() : null;
+
+  for (const { slug, source_id } of allRefs) {
+    const page = await engine.getPage(slug, { sourceId: source_id });
+    if (!page) continue;
+    if (typeFilter && page.type !== typeFilter) continue;
+    if (sinceMs !== null) {
+      const updatedMs = new Date(page.updated_at).getTime();
+      if (Number.isFinite(updatedMs) && updatedMs <= sinceMs) continue;
+    }
+    processed++;
+    progress.tick();
+
+    // D3: scan both columns joined with a paragraph separator so an
+    // end-of-compiled token doesn't accidentally merge with a
+    // start-of-timeline token into a false phrase match.
+    const body = page.compiled_truth + '\n\n' + (page.timeline ?? '');
+    if (!body.trim()) continue;
+
+    const mentions = findMentionedEntities(body, gazetteer, {
+      fromSlug: slug,
+      fromSourceId: source_id,
+    });
+
+    if (mentions.length === 0) continue;
+
+    for (const m of mentions) {
+      if (dryRun) {
+        if (jsonMode) {
+          process.stdout.write(JSON.stringify({
+            action: 'add_link', from: slug, from_source_id: source_id,
+            to: m.slug, to_source_id: m.source_id,
+            type: 'mentions', context: m.name, link_source: 'mentions',
+          }) + '\n');
+        } else {
+          console.log(`  ${slug} → ${m.slug} (mentions: "${m.name}")`);
+        }
+        created++;
+      } else {
+        batch.push({
+          from_slug: slug,
+          to_slug: m.slug,
+          link_type: 'mentions',
+          link_source: 'mentions',
+          context: m.name,
+          from_source_id: source_id,
+          to_source_id: m.source_id,
+        });
+        if (batch.length >= BATCH_SIZE) await flush();
+      }
+    }
+  }
+
+  if (!dryRun) await flush();
+  progress.finish();
+
+  if (!jsonMode) {
+    const label = dryRun ? '(dry run) would create' : 'created';
+    console.log(`Mentions: ${label} ${created} links from ${processed} pages against gazetteer of ${gazetteer.size} first-token buckets`);
   }
   return { created, pages: processed };
 }

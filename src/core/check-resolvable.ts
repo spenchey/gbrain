@@ -22,6 +22,11 @@ import {
   runRoutingEval,
 } from './routing-eval.ts';
 import { runFilingAudit } from './filing-audit.ts';
+import {
+  entriesToResolverContent,
+  findPrimaryResolverPath,
+  loadSkillTriggerIndex,
+} from './skill-trigger-index.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -175,7 +180,31 @@ function splitMarkdownTableColumns(line: string): string[] {
   return columns.filter(Boolean);
 }
 
-/** Parse RESOLVER.md markdown tables into structured entries. */
+/**
+ * Parse RESOLVER.md / AGENTS.md into structured entries. Supports two formats
+ * that can mix in one file:
+ *
+ *   Format 1 (table) — original gbrain shape, optionally with 3 columns and
+ *   absolute paths to support OpenClaw-style references:
+ *     | trigger phrase | `skills/<name>/SKILL.md` |
+ *     | "ingest google ads" | batch | `/path/to/skills/gads-ingest/SKILL.md` |
+ *
+ *   Format 2 (compact list, v0.41.7.0) — OpenClaw-native shape:
+ *     - **skill-name**: trigger1 | trigger2 | trigger3
+ *     - skill-name: trigger1 | trigger2
+ *
+ * List-format constraints (v0.41.7.0):
+ *   - Skill name MUST be kebab-lowercase (`[a-z][a-z0-9-]+`). Bold names
+ *     like `**Note**`, `**Convention**`, `**TODO**` are skipped so prose
+ *     bullets in real-world AGENTS.md files don't get mis-parsed.
+ *   - `skillPath` is ALWAYS derived as `skills/<name>/SKILL.md`. An
+ *     optional `→ \`skills/path\`` (or ASCII `->`) suffix is stripped but
+ *     NOT honored as the path.
+ *   - Multiple triggers fan out to one entry per trigger.
+ *
+ * The `skillsDir` param (local fork addition) lets table-format absolute paths
+ * resolve to the current skills directory so OpenClaw deployments parse cleanly.
+ */
 export function parseResolverEntries(resolverContent: string, skillsDir?: string): ResolverEntry[] {
   const entries: ResolverEntry[] = [];
   let currentSection = '';
@@ -188,38 +217,72 @@ export function parseResolverEntries(resolverContent: string, skillsDir?: string
       continue;
     }
 
-    // Skip non-table rows
-    if (!line.startsWith('|') || line.includes('---')) continue;
+    // ── Format 1: Markdown table rows ──
+    if (line.startsWith('|') && !line.includes('---')) {
+      const cols = line.split('|').map(c => c.trim()).filter(Boolean);
+      if (cols.length < 2) continue;
 
-    // Split table columns
-    const cols = splitMarkdownTableColumns(line);
-    if (cols.length < 2) continue;
+      // Split table columns via the local helper that handles escaped pipes
+      // inside backtick-wrapped code segments (avoids splitting on `|` inside
+      // command examples). Re-do the split to override the simple one above.
+      const cols2 = splitMarkdownTableColumns(line);
+      if (cols2.length < 2) continue;
 
-    const trigger = cols[0];
-    const skillCol = cols[cols.length - 1];
+      const trigger = cols2[0];
+      // 2-column shape: trigger | skill. 3-column shape (OpenClaw-style):
+      // trigger | mode | skill. Either way, the skill cell is the last one.
+      const skillCol = cols2[cols2.length - 1];
 
-    // Skip header rows
-    if (trigger.toLowerCase() === 'trigger' || trigger.toLowerCase() === 'skill') continue;
+      // Skip header rows
+      if (trigger.toLowerCase() === 'trigger' || trigger.toLowerCase() === 'skill') continue;
 
-    // Check for GStack entries
-    if (skillCol.startsWith('GStack:') || skillCol.startsWith('Check ') || skillCol.startsWith('Read ')) {
-      entries.push({ trigger, skillPath: skillCol, isGStack: true, section: currentSection });
+      // GStack / external references (Check `ACCESS_POLICY.md`, Read X, GStack: Y)
+      if (skillCol.startsWith('GStack:') || skillCol.startsWith('Check ') || skillCol.startsWith('Read ')) {
+        entries.push({ trigger, skillPath: skillCol, isGStack: true, section: currentSection });
+        continue;
+      }
+
+      // Backtick-wrapped skill path. Use normalizeResolverSkillPath so
+      // OpenClaw-style absolute paths (e.g. `/Users/.../skills/foo/SKILL.md`)
+      // resolve relative to the current skillsDir when they live inside it.
+      const pathMatches = [...skillCol.matchAll(/`([^`]+\/SKILL\.md)`/g)];
+      for (const pathMatch of pathMatches) {
+        const normalized = normalizeResolverSkillPath(pathMatch[1], skillsDir);
+        if (!normalized) continue;
+        entries.push({
+          trigger,
+          skillPath: normalized.skillPath,
+          isGStack: normalized.isExternal,
+          section: currentSection,
+        });
+      }
       continue;
     }
 
-    // Extract skill paths from backtick-wrapped references. Support both
-    // 2-column `Trigger | Skill` tables and 3-column `Trigger | Mode | Go to`
-    // tables, plus OpenClaw-style absolute references to the active skills dir.
-    const pathMatches = [...skillCol.matchAll(/`([^`]+\/SKILL\.md)`/g)];
-    for (const match of pathMatches) {
-      const normalized = normalizeResolverSkillPath(match[1], skillsDir);
-      if (!normalized) continue;
-      entries.push({
-        trigger,
-        skillPath: normalized.skillPath,
-        isGStack: normalized.isExternal,
-        section: currentSection,
-      });
+    // ── Format 2: Compact list rows (v0.41.7.0) ──
+    // Bold form preferred: `- **skill-name**: trigger1 | trigger2`
+    // Plain fallback:     `- skill-name: trigger1 | trigger2`
+    // Name regex is kebab-lowercase only so prose bullets like `- **Note**: …`
+    // don't false-match as skill rows (codex F2 / D4).
+    const listBold = line.match(/^-\s+\*\*([a-z][a-z0-9-]+)\*\*\s*:\s*(.+)$/);
+    const listPlain = listBold ? null : line.match(/^-\s+([a-z][a-z0-9-]+)\s*:\s*(.+)$/);
+    const listMatch = listBold ?? listPlain;
+    if (listMatch) {
+      const skillName = listMatch[1];
+      const triggersRaw = listMatch[2].trim();
+      // Strip optional explicit path suffix (D3: stripped, NOT captured).
+      // Both Unicode → and ASCII -> accepted; skillPath is always derived.
+      const cleaned = triggersRaw.replace(/\s*(?:→|->)\s*`skills\/[^`]+`\s*$/, '');
+      // Split on |, drop empty pieces and the literal `...` placeholder.
+      const triggers = cleaned
+        .split('|')
+        .map(t => t.trim())
+        .filter(t => t.length > 0 && t !== '...');
+      const skillPath = `skills/${skillName}/SKILL.md`;
+      // Multiple entries share skillPath; checkResolvable dedupes downstream.
+      for (const trigger of triggers) {
+        entries.push({ trigger, skillPath, isGStack: false, section: currentSection });
+      }
     }
   }
 
@@ -318,31 +381,39 @@ export function extractDelegationTargets(content: string): DelegationRef[] {
 export function checkResolvable(skillsDir: string): ResolvableReport {
   const issues: ResolvableIssue[] = [];
 
-  // Load inputs
-  // Accept RESOLVER.md or AGENTS.md (W1). Also check one level up: the
-  // reference OpenClaw deployment layout places AGENTS.md at the
-  // workspace root, with skills/ below.
+  // Load inputs via the v0.41.11 shared primitive. UNION semantics
+  // across two surfaces:
+  //   1. Per-skill SKILL.md frontmatter `triggers:` (canonical) — every
+  //      skill ships its own triggers; new skills don't need a
+  //      RESOLVER.md row to be reachable.
+  //   2. Curated RESOLVER.md / AGENTS.md rows from skillsDir AND parent
+  //      directory (D-CX-14 OpenClaw workspace-root layout preserved).
   //
-  // Merge strategy (D-CX-14): collect entries from ALL resolver files
-  // across both directories (skills dir + parent). This handles the
-  // common OpenClaw layout where a skillpack installs a thin
-  // skills/RESOLVER.md while the real dispatcher lives in ../AGENTS.md.
-  // Entries are deduped by skillPath (first occurrence wins).
-  const allResolverPaths = [
-    ...findAllResolverFiles(skillsDir),
-    ...findAllResolverFiles(join(skillsDir, '..')),
-  ];
+  // Frontmatter is the source of truth (closes the #1451 drift class);
+  // RESOLVER.md rows still contribute additively so the human-readable
+  // dispatcher map stays load-bearing. See src/core/skill-trigger-index.ts.
+  const triggerEntries = loadSkillTriggerIndex(skillsDir);
 
-  // Primary resolver: first found (for error messages and --fix targets)
-  const resolverPath = allResolverPaths[0] ?? null;
-  if (!resolverPath) {
+  // Primary RESOLVER.md path is still needed for error messages and
+  // --fix targets that have to point at a concrete file. When neither
+  // RESOLVER.md nor AGENTS.md exists but frontmatter triggers DO
+  // populate the index, fall back to a suggested path so `fix:` blocks
+  // still have a concrete target (auto-fix paths that touch RESOLVER.md
+  // will create it on first write).
+  const resolverPathOrNull = findPrimaryResolverPath(skillsDir);
+  const resolverPath = resolverPathOrNull ?? join(skillsDir, 'RESOLVER.md');
+  if (!resolverPathOrNull && triggerEntries.length === 0) {
+    // No RESOLVER.md / AGENTS.md anywhere AND no skill ships frontmatter
+    // triggers — the resolver tree is fully empty. Preserve the
+    // original 'missing_file' error semantics so doctor's UX doesn't
+    // regress for genuinely-uninitialized skills directories.
     const suggested = join(skillsDir, 'RESOLVER.md');
     const missingIssue: ResolvableIssue = {
       type: 'missing_file',
       severity: 'error',
       skill: RESOLVER_FILENAMES_LABEL,
-      message: `${RESOLVER_FILENAMES_LABEL} not found in ${skillsDir} or its parent`,
-      action: `Create ${suggested} with skill routing tables`,
+      message: `${RESOLVER_FILENAMES_LABEL} not found in ${skillsDir} or its parent (and no SKILL.md frontmatter declares triggers:)`,
+      action: `Create ${suggested} with skill routing tables, or add 'triggers:' to each SKILL.md frontmatter`,
       fix: { type: 'create_stub', file: suggested },
     };
     return {
@@ -354,22 +425,13 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
     };
   }
 
-  // Merge entries from all resolver files, dedup by skillPath.
-  // Also build a combined resolverContent for routing-eval (Check 5).
-  const seenSkillPaths = new Set<string>();
-  const entries: ResolverEntry[] = [];
-  const resolverContentParts: string[] = [];
-  for (const rPath of allResolverPaths) {
-    const content = readFileSync(rPath, 'utf-8');
-    resolverContentParts.push(content);
-    for (const entry of parseResolverEntries(content, skillsDir)) {
-      if (!seenSkillPaths.has(entry.skillPath)) {
-        seenSkillPaths.add(entry.skillPath);
-        entries.push(entry);
-      }
-    }
-  }
-  const resolverContent = resolverContentParts.join('\n\n');
+  // v0.41.14 architectural fix (#1451): unified entry stream from the shared
+  // loadSkillTriggerIndex primitive (frontmatter triggers: + RESOLVER.md /
+  // AGENTS.md, including the OpenClaw `../AGENTS.md` parent-dir merge).
+  // The triggerEntries projection becomes the canonical ResolverEntry[] shape
+  // and we synthesize resolverContent for routing-eval / lint downstream.
+  const entries: ResolverEntry[] = triggerEntries;
+  const resolverContent = entriesToResolverContent(triggerEntries);
   const { skills: manifest } = loadOrDeriveManifest(skillsDir);
 
   // Build lookup sets
@@ -572,12 +634,19 @@ export function checkResolvable(skillsDir: string): ResolvableReport {
           : d.outcome === 'ambiguous'
             ? 'routing_ambiguous'
             : 'routing_false_positive';
+      const skillName = d.fixture.expected_skill ?? 'negative-case';
+      // v0.41.11: triggers live in SKILL.md frontmatter (canonical) AND
+      // RESOLVER.md rows. Point the agent at the canonical surface
+      // first; the dispatcher map is the secondary edit point.
+      const editTarget = d.fixture.expected_skill
+        ? `skills/${d.fixture.expected_skill}/SKILL.md frontmatter triggers: (canonical) or skills/RESOLVER.md row (dispatcher map)`
+        : `the relevant skill's SKILL.md frontmatter triggers:`;
       issues.push({
         type: kind,
         severity: 'warning',
-        skill: d.fixture.expected_skill ?? 'negative-case',
+        skill: skillName,
         message: `Routing ${d.outcome} for intent "${d.fixture.intent}"`,
-        action: `Update routing-eval.jsonl fixture or broaden resolver triggers in RESOLVER.md (${d.note ?? 'no additional detail'})`,
+        action: `Update routing-eval.jsonl fixture or broaden ${editTarget} (${d.note ?? 'no additional detail'})`,
       });
     }
   }
