@@ -10,6 +10,20 @@ triggers:
   - listing hero concept
   - visual campaign variant
   - generated design asset
+  - employee likeness creative
+  - employee likeness
+  - facility reference creative
+  - email design creative
+  - lora training data
+  - weekly content plan
+  - motor inn content plan
+  - youtube training data
+  - motor inn youtube
+  - youtube walkaround
+  - competitor inspiration
+  - power ford
+  - social media inspiration
+  - comfyui
 ---
 # Motor Inn SANA Creative
 
