@@ -14,6 +14,7 @@
  *   gbrain dream --dry-run             # preview, no writes
  *   gbrain dream --json                # CycleReport JSON (for agents)
  *   gbrain dream --phase lint          # run a single phase
+ *   gbrain dream --source agent        # mark source-scoped cycle freshness
  *   gbrain dream --pull                # also git pull the brain repo
  *   gbrain dream --dir /path/to/brain  # explicit brain location
  *
@@ -38,6 +39,8 @@ interface DreamArgs {
   dryRun: boolean;
   pull: boolean;
   phase: CyclePhase | null;
+  skipPhases: CyclePhase[];
+  sourceId: string | null;
   dir: string | null;
   help: boolean;
   /** v0.21: ad-hoc transcript file path; implies --phase synthesize. */
@@ -71,6 +74,30 @@ function parseArgs(args: string[]): DreamArgs {
 
   const dirIdx = args.indexOf('--dir');
   const dir = dirIdx !== -1 ? args[dirIdx + 1] : null;
+
+  const sourceIdx = args.indexOf('--source');
+  const sourceId = sourceIdx !== -1 ? args[sourceIdx + 1] ?? null : null;
+  if (sourceIdx !== -1 && !sourceId) {
+    console.error('--source requires a source id');
+    process.exit(2);
+  }
+
+  const skipPhases: CyclePhase[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '--skip-phase') continue;
+    const raw = args[i + 1];
+    if (!raw) {
+      console.error('--skip-phase requires a phase name');
+      process.exit(2);
+    }
+    for (const name of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+      if (!(ALL_PHASES as string[]).includes(name)) {
+        console.error(`Unknown skip phase "${name}". Valid: ${ALL_PHASES.join(', ')}`);
+        process.exit(1);
+      }
+      skipPhases.push(name as CyclePhase);
+    }
+  }
 
   const inputIdx = args.indexOf('--input');
   const inputFile = inputIdx !== -1 ? args[inputIdx + 1] ?? null : null;
@@ -115,6 +142,8 @@ function parseArgs(args: string[]): DreamArgs {
     dryRun: args.includes('--dry-run'),
     pull: args.includes('--pull'),
     phase,
+    skipPhases,
+    sourceId,
     dir,
     help: args.includes('--help') || args.includes('-h'),
     inputFile,
@@ -180,6 +209,9 @@ Options:
                       "--dry-run" does NOT mean "zero LLM calls."
   --json              Emit the CycleReport as JSON (agent-readable)
   --phase <name>      Run a single phase: ${ALL_PHASES.join(' | ')}
+  --skip-phase <name> Skip a phase in a full cycle. Repeatable; comma-separated
+                      values are accepted. Ignored when --phase is set.
+  --source <id>       Mark a successful cycle as fresh for this source.
   --pull              git pull the brain repo before syncing (default: no pull)
   --dir <path>        Brain directory (default: configured brain)
 
@@ -276,7 +308,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   }
 
   const brainDir = await resolveBrainDir(engine, opts.dir);
-  const phases: CyclePhase[] | undefined = opts.phase ? [opts.phase] : undefined;
+  const phases: CyclePhase[] | undefined = opts.phase
+    ? [opts.phase]
+    : (opts.skipPhases.length > 0
+      ? ALL_PHASES.filter(p => !opts.skipPhases.includes(p))
+      : undefined);
 
   const report = await runCycle(engine, {
     brainDir,
@@ -288,6 +324,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
+    sourceId: opts.sourceId ?? undefined,
   });
 
   if (opts.json) {
