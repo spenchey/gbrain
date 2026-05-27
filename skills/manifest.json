@@ -70,6 +70,11 @@
       "description": "Ingest links, articles, tweets, and ideas into the brain with analysis and entity cross-linking."
     },
     {
+      "name": "x-post-reader",
+      "path": "x-post-reader/SKILL.md",
+      "description": "Deterministically fetch X/Twitter status URLs via the host X API credentials before summarizing, citing, or ingesting the post."
+    },
+    {
       "name": "media-ingest",
       "path": "media-ingest/SKILL.md",
       "description": "Ingest video, audio, PDF, book, screenshot, and repo content with entity extraction."

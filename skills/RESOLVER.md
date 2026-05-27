@@ -32,6 +32,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Trigger | Skill |
 |---------|-------|
 | "capture this", "save this thought", "remember this", "drop this in the inbox", "save to brain" | `skills/capture/SKILL.md` |
+| X/Twitter status URL, "read this tweet", "read this X post", public X page is blank | `skills/x-post-reader/SKILL.md` |
 | User shares a link, article, tweet, or idea | `skills/idea-ingest/SKILL.md` |
 | "watch this video", "process this YouTube link", "ingest this PDF", "save this podcast", "process this book", "summarize this book", "PDF book", "ingest it into my brain", "what's in this screenshot", "check out this repo" | `skills/media-ingest/SKILL.md` |
 | Meeting transcript received | `skills/meeting-ingestion/SKILL.md` |
@@ -130,4 +131,3 @@ These apply to ALL brain-writing skills:
 | "make pdf from brain", "brain pdf", "convert brain page to pdf", "publish this page as pdf", "export brain page" | `skills/brain-pdf/SKILL.md` |
 | "voice note", "ingest this voice memo", "transcribe and file", "voice note ingest", "save this audio note" | `skills/voice-note-ingest/SKILL.md` |
 | "add a page type", "add a type to my schema", "schema author", "schema mutate", "schema pack add", "my brain has untyped pages", "propose new types from my corpus", "backfill page types", "evolve my schema", "researcher type", "make X an expert type" (dispatcher for: gbrain schema active/list/show/validate/graph/lint/stats/explain/use/downgrade/reload/init/fork/edit/diff/add-type/remove-type/update-type/add-alias/remove-alias/add-prefix/remove-prefix/add-link-type/remove-link-type/set-extractable/set-expert-routing/detect/suggest/review-candidates/review-orphans/sync) | `skills/schema-author/SKILL.md` |
-

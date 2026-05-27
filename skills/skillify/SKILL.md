@@ -218,6 +218,28 @@ NOW that eval has proven quality, write tests that lock it in:
 **Integration tests** — hit real endpoints. Catch bugs mocks hide.
 **LLM evals** — quality/correctness for LLM steps. Lighter than cross-modal eval — test specific behaviors.
 
+### Measured skill optimization rules
+
+Use these when improving an existing skill after a failure, benchmark result,
+or routing miss:
+
+- **Strict validation gate.** Accept a skill edit only when a held-out eval,
+  routing eval, or deterministic test improves. Ties do not count.
+- **Bounded edits.** Prefer 4-8 targeted changes over full rewrites. Large
+  rewrites blur causality and make regressions harder to attribute.
+- **Compactness wins.** Keep the body high-signal. If a skill needs long
+  examples or source notes, move them to `references/`.
+- **Description and body are separate surfaces.** The resolver sees the
+  description/triggers; the activated agent sees the body. Test both.
+- **Measure per skill, not only aggregate.** A 1pp corpus move can hide a
+  20pp routing fix or regression on one important skill.
+- **Negative controls matter.** Include nearby prompts that should *not*
+  activate this skill.
+- **Protect slow lessons from fast edits.** Put stable invariants in the
+  contract/decision rules; put volatile examples, benchmark logs, and recent
+  cases in `references/` or fixtures so optimization does not overwrite the
+  durable rule.
+
 ## Phase 5: Resolver + Check-Resolvable (items 7-9)
 
 1. Add to skills/RESOLVER.md with trigger phrases users ACTUALLY type

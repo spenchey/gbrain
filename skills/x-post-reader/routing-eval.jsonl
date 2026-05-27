@@ -1,0 +1,6 @@
+{"intent":"read this X post https://x.com/koylanai/status/2059113412278227328","expected_skill":"x-post-reader","ambiguous_with":["idea-ingest"]}
+{"intent":"what does this tweet say https://twitter.com/garrytan/status/2042925773300908103","expected_skill":"x-post-reader","ambiguous_with":["idea-ingest","citation-fixer"]}
+{"intent":"put this x.com status into gbrain after reading it","expected_skill":"x-post-reader","ambiguous_with":["idea-ingest"]}
+{"intent":"fetch the full note_tweet text from this X link","expected_skill":"x-post-reader"}
+{"intent":"the public X page is blank, use our API credentials to read the tweet","expected_skill":"x-post-reader"}
+{"intent":"fix citations on pages with broken X/Twitter references","expected_skill":"citation-fixer","ambiguous_with":["x-post-reader"]}

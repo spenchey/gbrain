@@ -48,7 +48,7 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
 
 ## Phases
 
-1. **Fetch the content.** Use appropriate tools for the content type (web fetch for articles, API for tweets, PDF reader for documents).
+1. **Fetch the content.** Use appropriate tools for the content type (web fetch for articles, PDF reader for documents). For `x.com` / `twitter.com` status URLs, chain through `skills/x-post-reader/SKILL.md` first and use its deterministic JSON output; do not summarize X's public HTML shell.
 
 2. **Upload raw source.** Save the fetched content for provenance: `gbrain files upload-raw <file> --page <slug>`
 
