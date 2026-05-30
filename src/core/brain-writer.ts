@@ -609,6 +609,14 @@ function scanOneSource(
       if (opts.strictMissingOpen) return true;
       ignoredMissingOpen++;
       return false;
+    }).filter((e) => {
+      if (e.code !== 'SLUG_MISMATCH') return true;
+      // GBrain's own repository contains calibration fixtures whose frontmatter
+      // intentionally uses canonical brain slugs while the files live under
+      // test/fixtures. They are examples, not source pages that should be
+      // renamed to their fixture paths.
+      if (relPath.startsWith('test/fixtures/calibration/')) return false;
+      return true;
     });
     if (errs.length > 0) {
       total += errs.length;

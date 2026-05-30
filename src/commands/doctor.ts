@@ -1867,7 +1867,18 @@ async function checkEmbeddingEnvOverride(engine: BrainEngine): Promise<Check> {
     };
   }
   const mismatches: Array<{ key: string; env: string; db: string }> = [];
-  if (envModel && dbModel && envModel !== dbModel) {
+  const normalizeEmbeddingModel = (model: string): string => {
+    // File-plane installs commonly spell local Ollama models as
+    // `ollama:bge-m3` while older DB-plane rows stored just `bge-m3`.
+    // Those are the same runtime model; don't page the operator for a
+    // cosmetic provider prefix mismatch.
+    return model.startsWith('ollama:') ? model.slice('ollama:'.length) : model;
+  };
+  if (
+    envModel &&
+    dbModel &&
+    normalizeEmbeddingModel(envModel) !== normalizeEmbeddingModel(dbModel)
+  ) {
     mismatches.push({ key: 'GBRAIN_EMBEDDING_MODEL', env: envModel, db: dbModel });
   }
   if (envDim && dbDim && envDim !== dbDim) {
@@ -4130,6 +4141,7 @@ export async function buildChecks(
              octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) AS bytes
       FROM pages p
       WHERE p.deleted_at IS NULL
+        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > ${bytesBlock}
       ORDER BY bytes DESC
       LIMIT 100
