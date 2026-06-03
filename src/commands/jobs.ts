@@ -6,6 +6,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import { MinionWorker } from '../core/minions/worker.ts';
+import { WORKER_EXIT_RSS_WATCHDOG } from '../core/minions/worker-exit-codes.ts';
 import type { MinionJob, MinionJobStatus } from '../core/minions/types.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
@@ -778,11 +779,14 @@ HANDLER TYPES (built in)
 
       const queueName = parseFlag(args, '--queue') ?? 'default';
       const concurrency = resolveWorkerConcurrency(args);
-      // --max-rss defaults to 2048 for bare workers (matching supervisor default).
-      // This catches memory-leak stalls that previously went undetected without
-      // a supervisor. Operators can opt out with `--max-rss 0`.
+      // --max-rss: explicit value wins (including 0 to disable the watchdog).
+      // Absent → cgroup-aware auto-size (issue #1678): the flat 2048MB default
+      // killed legit embed work (~10GB) on every cycle and produced a silent
+      // ~400×/24h respawn loop. See src/core/minions/rss-default.ts.
       const maxRssExplicit = parseMaxRssFlag(args);
-      const maxRssMb = maxRssExplicit ?? 2048;
+      const { resolveDefaultMaxRssMb, describeDefaultMaxRss } =
+        await import('../core/minions/rss-default.ts');
+      const maxRssMb = maxRssExplicit ?? resolveDefaultMaxRssMb();
 
       // --health-interval: self-health-check period in ms. 0 disables. Default: 60_000 (60s).
       // Provides DB liveness probes + stall detection for bare workers.
@@ -836,7 +840,15 @@ HANDLER TYPES (built in)
       });
 
       const isSupervisedChild = process.env.GBRAIN_SUPERVISED === '1';
-      const watchdogNote = maxRssMb > 0 ? `, watchdog: ${maxRssMb}MB` : '';
+      let watchdogNote = '';
+      if (maxRssMb > 0) {
+        if (maxRssExplicit !== undefined) {
+          watchdogNote = `, watchdog: ${maxRssMb}MB (explicit)`;
+        } else {
+          const d = describeDefaultMaxRss();
+          watchdogNote = `, watchdog: ${maxRssMb}MB (auto-sized from ${Math.round(d.basisMb / 1024)}GB ${d.source} RAM)`;
+        }
+      }
       const healthNote = !isSupervisedChild && healthCheckInterval > 0
         ? `, health-check: ${Math.round(healthCheckInterval / 1000)}s`
         : '';
@@ -856,6 +868,18 @@ HANDLER TYPES (built in)
         // tests in earlier waves of this branch.
         try { await engine.disconnect(); }
         catch (e) { console.error('[gbrain jobs work] engine disconnect failed during shutdown:', e); }
+
+        // If the RSS watchdog (not a normal SIGTERM) drained the worker, exit
+        // with the distinct WORKER_EXIT_RSS_WATCHDOG code so the supervisor
+        // classifies the drain as `rss_watchdog` (cause-keyed backoff + loud
+        // alert) instead of a silent `clean_exit`. The worker exposes the
+        // intent; the CLI owns process.exit (same ownership boundary as the
+        // engine-disconnect above). Explicit process.exit also guarantees the
+        // code even if a lingering handle would otherwise keep the process
+        // alive past natural exit (issue #1678, Codex #7).
+        if (worker.rssWatchdogTriggered) {
+          process.exit(WORKER_EXIT_RSS_WATCHDOG);
+        }
       }
       break;
     }
@@ -1021,9 +1045,13 @@ HANDLER TYPES (built in)
       const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
                              !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
       const detach = hasFlag(args, '--detach');
-      // Supervisor defaults --max-rss 2048 (MB) — main production path uses
-      // the supervisor, so the watchdog is on by default here.
-      const maxRssMb = parseMaxRssFlag(args) ?? 2048;
+      // Supervisor's --max-rss: explicit wins; absent → cgroup-aware auto-size
+      // (issue #1678). The supervisor is the main production path, so the
+      // watchdog is on by default — but at a realistic, RAM-relative cap
+      // instead of the old flat 2048MB footgun.
+      const { resolveDefaultMaxRssMb: resolveSupMaxRss } =
+        await import('../core/minions/rss-default.ts');
+      const maxRssMb = parseMaxRssFlag(args) ?? resolveSupMaxRss();
 
       const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 
@@ -1207,7 +1235,9 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   worker.register('lint', async (job) => {
     const { runLintCore } = await import('./lint.ts');
     const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
-    const result = await runLintCore({ target, fix: !!job.data.fix, dryRun: !!job.data.dryRun });
+    // issue #1678: reuse the worker's live engine for lint's content-sanity
+    // DB lift so it doesn't create + disconnect a competing engine.
+    const result = await runLintCore({ target, fix: !!job.data.fix, dryRun: !!job.data.dryRun, engine });
     return result;
   });
 
@@ -1243,6 +1273,43 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
       segmentLimit: typeof job.data.segmentLimit === 'number' ? job.data.segmentLimit : undefined,
       maxCostUsd: typeof job.data.maxCostUsd === 'number' ? job.data.maxCostUsd : undefined,
       overrideDisabled: !!job.data.overrideDisabled,
+      // v0.41.15.0 (D9): round-trip --workers via job.data.workers so
+      // `gbrain extract-conversation-facts --background --workers 20`
+      // works end-to-end.
+      workers: typeof job.data.workers === 'number' ? job.data.workers : undefined,
+    });
+    return result;
+  });
+
+  // v0.41.39 (#1700) — enrich. NOT in PROTECTED_JOB_NAMES: per-call cost is
+  // bounded by data.maxCostUsd (default DEFAULT_MAX_COST_USD) and the handler
+  // re-creates the BudgetTracker in its own process. BudgetExhausted is caught
+  // at the core level and returned as result.budget_exhausted (NOT a failure).
+  // Strict per-source: the CLI fans out one job per source when --source is
+  // omitted, so a job ALWAYS carries data.sourceId.
+  worker.register('enrich', async (job) => {
+    const { runEnrichCore } = await import('./enrich.ts');
+    const sourceId = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+    if (!sourceId) {
+      throw new Error('enrich Minion job requires data.sourceId (CLI fans out one job per source)');
+    }
+    const types = Array.isArray(job.data.types)
+      ? (job.data.types as string[])
+      : undefined;
+    const order = typeof job.data.order === 'string' ? job.data.order : undefined;
+    const result = await runEnrichCore(engine, {
+      sourceId,
+      types: types as import('../core/types.ts').PageType[] | undefined,
+      order: order as ('inbound-links' | 'salience' | 'updated') | undefined,
+      limit: typeof job.data.limit === 'number' ? job.data.limit : undefined,
+      workers: typeof job.data.workers === 'number' ? job.data.workers : undefined,
+      model: typeof job.data.model === 'string' ? job.data.model : undefined,
+      maxCostUsd: typeof job.data.maxCostUsd === 'number' ? job.data.maxCostUsd : undefined,
+      minContextChars: typeof job.data.minContextChars === 'number' ? job.data.minContextChars : undefined,
+      thinThreshold: typeof job.data.thinThreshold === 'number' ? job.data.thinThreshold : undefined,
+      reenrichAfterMs: typeof job.data.reenrichAfterMs === 'number' ? job.data.reenrichAfterMs : undefined,
+      dryRun: !!job.data.dryRun,
+      force: !!job.data.force,
     });
     return result;
   });
@@ -1254,7 +1321,8 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   worker.register('lint-fix', async (job) => {
     const { runLintCore } = await import('./lint.ts');
     const target = typeof job.data.dir === 'string' ? job.data.dir : '.';
-    return await runLintCore({ target, fix: true, dryRun: false });
+    // issue #1678: reuse the worker's live engine (see 'lint' handler).
+    return await runLintCore({ target, fix: true, dryRun: false, engine });
   });
 
   worker.register('integrity-auto', async () => {
@@ -1330,9 +1398,14 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   // throw on partial: a flaky phase must not block every future cycle.
   worker.register('autopilot-cycle', async (job) => {
     const { runCycle } = await import('../core/cycle.ts');
-    const repoPath = typeof job.data.repoPath === 'string'
+    // v0.41.30 (T2): fall back to null (NOT cwd '.') when no repo is configured.
+    // The queued cycle is the same primitive `gbrain dream` uses; a checkout-less
+    // postgres brain should skip filesystem phases (no_brain_dir) and run the
+    // DB-only phases (resolve_symbol_edges, embed, ...) — not silently lint/sync
+    // against whatever directory the worker happens to be running in.
+    const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
-      : (await engine.getConfig('sync.repo_path')) ?? '.';
+      : (await engine.getConfig('sync.repo_path')) ?? null;
 
     // v0.38 (codex r1 P1-2 + P1-5): per-source dispatch threading.
     //   - source_id: when set, runCycle uses the per-source lock ID and
@@ -1521,9 +1594,14 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
   // the single source of truth for phase semantics.
   const makePhaseHandler = (phase: string) => async (job: any) => {
     const { runCycle } = await import('../core/cycle.ts');
-    const repoPath = typeof job.data.repoPath === 'string'
+    // v0.41.38 (codex P2 review): fall back to null (NOT cwd '.') when no repo
+    // is configured, matching the autopilot-cycle handler + `gbrain dream`. On a
+    // checkout-less postgres brain a filesystem phase (synthesize/patterns/...)
+    // skips with reason 'no_brain_dir' instead of running against the worker cwd;
+    // DB-only phases (resolve_symbol_edges/embed/...) ignore brainDir either way.
+    const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
-      : ((await engine.getConfig('sync.repo_path')) ?? '.');
+      : ((await engine.getConfig('sync.repo_path')) ?? null);
     const report = await runCycle(engine, {
       brainDir: repoPath,
       phases: [phase as any],
@@ -1551,7 +1629,141 @@ export async function registerBuiltinHandlers(worker: MinionWorker, engine: Brai
     return await makeEmbedBackfillHandler(engine)(job);
   });
 
-  process.stderr.write('[minion worker] brain-health-100 handlers registered (11 ops, 3 protected) + embed-backfill (v0.40)\n');
+  // v0.41.18.0 (A10, T7): extract-ner handler for the gbrain onboard
+  // remediation pipeline. Wraps extractNerLinks; emits typed_ner kind
+  // alongside the by-mention 'plain' kind. NOT in PROTECTED_JOB_NAMES
+  // (regex-only, no LLM spend).
+  worker.register('extract-ner', async (job) => {
+    const { extractNerLinks } = await import('../core/extract-ner.ts');
+    const data = (job.data ?? {}) as { sourceId?: string };
+    return await extractNerLinks(engine, {
+      sourceIdFilter: data.sourceId,
+    });
+  });
+
+  // v0.41.18.0 (A12, T9): extract-takes-from-pages handler. PROTECTED
+  // (LLM-bearing). Two-gate consent enforced at the handler boundary:
+  // refuses to run unless takes.bootstrap_enabled config is true, even
+  // when allowProtectedSubmit was set at queue.add time.
+  worker.register('extract-takes-from-pages', async (job) => {
+    const { extractTakesFromPages } = await import('../core/extract-takes-from-pages.ts');
+    const data = (job.data ?? {}) as { sourceId?: string; maxPages?: number };
+    const bootstrapCfg = await engine.getConfig('takes.bootstrap_enabled');
+    const bootstrapEnabled = bootstrapCfg === 'true' || bootstrapCfg === '1';
+    return await extractTakesFromPages(engine, {
+      bootstrapEnabled,
+      sourceIdFilter: data.sourceId,
+      maxPages: data.maxPages,
+    });
+  });
+
+  // v0.41.18.0 (A11, T8): extract-timeline-from-meetings handler. Wraps
+  // extractTimelineFromMeetings. NOT in PROTECTED_JOB_NAMES (pure SQL + string
+  // scan, no LLM spend).
+  worker.register('extract-timeline-from-meetings', async (job) => {
+    const { extractTimelineFromMeetings } = await import('../core/extract-timeline-from-meetings.ts');
+    const data = (job.data ?? {}) as { sourceId?: string };
+    return await extractTimelineFromMeetings(engine, {
+      sourceIdFilter: data.sourceId,
+    });
+  });
+
+  // v0.41.18.0 (A13): embed-catch-up handler for the gbrain onboard
+  // remediation pipeline. Wraps runEmbedCore with stale + catchUp + the
+  // priority/batchSize the recommendation supplies. NOT in
+  // PROTECTED_JOB_NAMES (embedding spend only).
+  worker.register('embed-catch-up', async (job) => {
+    const { runEmbedCore } = await import('./embed.ts');
+    const data = (job.data ?? {}) as {
+      sourceId?: string;
+      batchSize?: number;
+      priority?: 'recent';
+    };
+    return await runEmbedCore(engine, {
+      stale: true,
+      catchUp: true,
+      batchSize: data.batchSize,
+      priority: data.priority,
+      sourceId: data.sourceId,
+    });
+  });
+
+  // v0.42 type-unification (T10): unify-types PROTECTED handler. Pack-upgrade
+  // migration that retypes 25K+ pages, creates alias rows, converts edge-
+  // shaped pages to link rows, AND flips the active pack at end of run.
+  // manual_only via src/core/onboard/render.ts:MANUAL_ONLY_PROTECTED_JOBS.
+  // Operator path: `gbrain jobs submit unify-types --allow-protected --params
+  // '{"target_pack":"gbrain-base-v2"}'`.
+  worker.register('unify-types', async (job) => {
+    const { runUnifyTypes } = await import('../core/schema-pack/unify-types-handler.ts');
+    const data = (job.data ?? {}) as {
+      target_pack?: string;
+      apply?: boolean;
+      sourceId?: string;
+    };
+    if (!data.target_pack) {
+      throw new Error(`unify-types: missing required 'target_pack' parameter`);
+    }
+    const ctx = {
+      engine,
+      cfg: null,
+      remote: false,
+    } as unknown as import('../core/operations.ts').OperationContext;
+    return await runUnifyTypes(ctx, {
+      target_pack: data.target_pack,
+      apply: data.apply ?? true,
+      sourceId: data.sourceId,
+      onProgress: (msg: string) => {
+        job.updateProgress({ phase: 'unify-types', message: msg }).catch(() => {});
+        process.stderr.write(msg + '\n');
+      },
+    });
+  });
+
+  // v0.42.0.0 SkillOpt Minion handler — for --background CLI invocations.
+  // PROTECTED by name so MCP submission rejects (only trusted CLI can
+  // submit). Threaded SkillOptOpts JSON in job.data.
+  worker.register('skillopt', async (job) => {
+    const { runSkillOpt } = await import('../core/skillopt/orchestrator.ts');
+    const data = (job.data ?? {}) as Record<string, unknown>;
+    const skillsDir = String(data.skills_dir ?? '');
+    const skillName = String(data.skill_name ?? '');
+    const benchmarkPath = String(data.benchmark_path ?? '');
+    if (!skillsDir || !skillName || !benchmarkPath) {
+      throw new Error(`skillopt handler: missing required job.data fields (skills_dir, skill_name, benchmark_path)`);
+    }
+    const result = await runSkillOpt({
+      engine,
+      skillName,
+      skillsDir,
+      benchmarkPath,
+      epochs: Number(data.epochs ?? 4),
+      batchSize: Number(data.batch_size ?? 8),
+      lr: Number(data.lr ?? 4),
+      lrSchedule: (data.lr_schedule as 'cosine' | 'linear' | 'constant') ?? 'cosine',
+      split: (data.split as [number, number, number]) ?? [4, 1, 5],
+      optimizerModel: String(data.optimizer_model ?? 'anthropic:claude-opus-4-7'),
+      targetModel: String(data.target_model ?? 'anthropic:claude-sonnet-4-6'),
+      judgeModel: String(data.judge_model ?? 'anthropic:claude-sonnet-4-6'),
+      mode: (data.mode as 'patch' | 'rewrite') ?? 'patch',
+      dryRun: Boolean(data.dry_run),
+      noMutate: Boolean(data.no_mutate),
+      allowMutateBundled: Boolean(data.allow_mutate_bundled),
+      bootstrapReviewed: Boolean(data.bootstrap_reviewed),
+      json: true,
+      maxCostUsd: Number(data.max_cost_usd ?? 5.0),
+      maxRuntimeMin: Number(data.max_runtime_min ?? 30),
+      force: Boolean(data.force),
+    });
+    return {
+      outcome: result.outcome,
+      receipt: result.receipt,
+      mutated_skill_file: result.mutatedSkillFile,
+      proposed_path: result.proposedPath,
+    };
+  });
+
+  process.stderr.write('[minion worker] brain-health-100 handlers registered (12 ops, 4 protected) + embed-backfill (v0.40) + embed-catch-up (v0.42) + unify-types (v0.42) + skillopt (v0.42.0.0, protected)\n');
 
   // Plugin discovery — one line per discovered plugin (mirrors the
   // openclaw-seam startup line convention from v0.11+). Loaded

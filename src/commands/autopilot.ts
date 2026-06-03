@@ -191,12 +191,16 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
 
   if (spawnManagedWorker) {
     const cliPath = resolveGbrainCliPath();
-    // Inject the RSS watchdog default (2048 MB) for the autopilot-supervised
-    // worker. Bare `gbrain jobs work` has no default; the supervisor and
-    // autopilot are the production paths that opt in.
+    // Cgroup-aware auto-sized RSS watchdog cap (issue #1678). The old flat
+    // 2048MB killed legit embed work (~10GB) on every cycle → silent
+    // ~400×/24h respawn loop. resolveDefaultMaxRssMb clamps 0.5×min(cgroup,
+    // RAM) to [4096,16384]. Bare `gbrain jobs work` resolves the same default;
+    // we pass it explicitly so the spawn log + child agree.
+    const { resolveDefaultMaxRssMb } = await import('../core/minions/rss-default.ts');
+    const autopilotMaxRssMb = resolveDefaultMaxRssMb();
     childSupervisor = new ChildWorkerSupervisor({
       cliPath,
-      args: ['jobs', 'work', '--max-rss', '2048'],
+      args: ['jobs', 'work', '--max-rss', String(autopilotMaxRssMb)],
       // process.env clone; autopilot doesn't gate shell jobs the way the
       // standalone supervisor does (autopilot is the operator-trust path).
       env: { ...process.env },
@@ -212,7 +216,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
         // existing logs see the same lines.
         if (event.kind === 'worker_spawned') {
           console.log(
-            `[autopilot] Minions worker spawned (pid: ${event.pid}, watchdog: 2048MB${event.tini ? ', tini: active' : ''})`,
+            `[autopilot] Minions worker spawned (pid: ${event.pid}, watchdog: ${autopilotMaxRssMb}MB${event.tini ? ', tini: active' : ''})`,
           );
         } else if (event.kind === 'worker_spawn_failed') {
           console.error(
@@ -511,7 +515,23 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           }),
           hasChatApiKey: !!(process.env.ANTHROPIC_API_KEY || await engine.getConfig('anthropic_api_key')),
         };
-        const plan = computeRecommendations(health, ctx).filter((r) => r.status === 'remediable');
+        // v0.41.18.0 (A5 + A19 + A22, T15): consult onboard recommendations
+        // ALONGSIDE doctor's brain-score recommendations. Onboard's 4 new
+        // checks (embed_staleness, link_coverage, timeline_coverage,
+        // takes_count) supply extraRemediations into computeRecommendations.
+        // Per A19 fail-open: any throw in the onboard path falls through
+        // to legacy doctor-only plan (no crash).
+        let extraRemediations: ReturnType<typeof computeRecommendations> = [];
+        try {
+          const { runAllOnboardChecks } = await import('../core/onboard/checks.ts');
+          const onboardResults = await runAllOnboardChecks(engine);
+          extraRemediations = onboardResults.flatMap((r) => r.remediations);
+        } catch (err) {
+          process.stderr.write(
+            `[autopilot] onboard checks failed (fail-open per A19): ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+        const plan = computeRecommendations(health, ctx, extraRemediations).filter((r) => r.status === 'remediable');
         const estTotal = plan.reduce((s, r) => s + r.est_seconds, 0);
 
         // Track time since last full cycle for the 60-min floor.
