@@ -6,6 +6,14 @@ import process from "node:process";
 const DEFAULT_REPORT_ROOT = "/Users/spencerheywood/nvidia-skills-upgrade/reports";
 const DEFAULT_INVENTORY = path.join(DEFAULT_REPORT_ROOT, "dealership-memory-source-inventory.json");
 const CONTRACT_ID = "dealership-memory-eval";
+const SECRET_PATTERNS = [
+  /nvapi-[A-Za-z0-9_-]{20,}/g,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+  /xapp-[A-Za-z0-9-]{10,}/g,
+  /ghp_[A-Za-z0-9]{20,}/g,
+  /sk-[A-Za-z0-9]{20,}/g,
+  /(NVIDIA_API_KEY|SLACK_BOT_TOKEN|SLACK_APP_TOKEN)=\S+/g,
+];
 
 const EVAL_QUESTIONS = [
   {
@@ -162,8 +170,12 @@ function normalizeText(text) {
     .trim();
 }
 
+function redactSecretLike(text) {
+  return SECRET_PATTERNS.reduce((redacted, pattern) => redacted.replace(pattern, "[REDACTED]"), text);
+}
+
 function splitSentences(text) {
-  const normalized = normalizeText(text);
+  const normalized = normalizeText(redactSecretLike(text));
   return normalized
     .split(/(?<=[.!?])\s+|\n+/)
     .map((sentence) => sentence.trim())
@@ -191,8 +203,61 @@ function bestSnippet(content, question) {
   return snippet.length > 900 ? `${snippet.slice(0, 897).trim()}...` : snippet;
 }
 
+function inferRelativePath(sourcePath) {
+  const normalized = sourcePath.split(path.sep).join("/");
+  const docsIndex = normalized.lastIndexOf("/docs/");
+  if (docsIndex >= 0) {
+    return normalized.slice(docsIndex + 1);
+  }
+  const gbrainIndex = normalized.lastIndexOf("/gbrain/");
+  if (gbrainIndex >= 0) {
+    return normalized.slice(gbrainIndex + "/gbrain/".length);
+  }
+  return path.basename(sourcePath);
+}
+
+function normalizeInventorySources(inventory) {
+  if (Array.isArray(inventory.included_sources)) {
+    return inventory.included_sources.map((source, index) => ({
+      source_id: source.source_id ?? `local-doc-${String(index + 1).padStart(3, "0")}`,
+      path: source.path,
+      relative_path: source.relative_path ?? inferRelativePath(source.path),
+      citation_label:
+        source.citation_label ??
+        `${source.source_id ?? `local-doc-${String(index + 1).padStart(3, "0")}`}:${source.relative_path ?? inferRelativePath(source.path)}`,
+    }));
+  }
+
+  if (Array.isArray(inventory.records)) {
+    return inventory.records
+      .filter((source) => source.status === "indexed" && source.citation_ready !== false)
+      .map((source, index) => {
+        const relativePath = source.relative_path ?? inferRelativePath(source.path);
+        const sourceId = source.citation_id ?? `local-doc-${String(index + 1).padStart(3, "0")}`;
+        return {
+          source_id: sourceId,
+          path: source.path,
+          relative_path: relativePath,
+          citation_label: `${sourceId}:${relativePath}`,
+        };
+      });
+  }
+
+  return [];
+}
+
+function findSource(question, sources) {
+  return sources.find((candidate) => {
+    if (candidate.relative_path === question.expected_source_path) {
+      return true;
+    }
+    return candidate.path && candidate.path.split(path.sep).join("/").endsWith(`/${question.expected_source_path}`);
+  });
+}
+
 function answerQuestion(question, inventory) {
-  const source = inventory.included_sources.find((candidate) => candidate.relative_path === question.expected_source_path);
+  const sources = normalizeInventorySources(inventory);
+  const source = findSource(question, sources);
   if (!source) {
     return {
       id: question.id,
@@ -250,7 +315,7 @@ function buildEvalReport({ inventoryPath, generatedAt }) {
     generated_at: generatedAt,
     status: failed === 0 && total === 20 ? "pass" : "fail",
     inventory_path: inventoryPath,
-    inventory_contract_id: inventory.contract_id,
+    inventory_contract_id: inventory.contract_id ?? inventory.contract_version ?? "unknown",
     aggregate_score: {
       total,
       passed,
@@ -265,6 +330,13 @@ function buildEvalReport({ inventoryPath, generatedAt }) {
       broad_email_ingestion: false,
       broad_slack_ingestion: false,
       proof_only: true,
+      answer_snippets_redact_secret_like_tokens: true,
+    },
+    retrieval_method: {
+      retrieval: "local-doc inventory expected-source lookup",
+      rerank: "keyword sentence scoring",
+      citations_required_for_pass: true,
+      endpoint_calls: "none; proof uses existing local docs only",
     },
     nvidia_concepts: [
       "rag-blueprint",
@@ -345,6 +417,8 @@ export {
   answerQuestion,
   bestSnippet,
   buildEvalReport,
+  normalizeInventorySources,
   renderMarkdown,
+  redactSecretLike,
   writeEvalReport,
 };
