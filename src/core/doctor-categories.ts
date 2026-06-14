@@ -84,6 +84,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'grade_confidence_drift',
   'graph_coverage',
   'graph_signals_coverage',
+  'hidden_by_search_policy',
   'image_assets',
   'integrity',
   'jsonb_integrity',
@@ -119,6 +120,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
  */
 export const SKILL_CHECK_NAMES: ReadonlySet<string> = new Set([
   'resolver_health',
+  'retrieval_reflex_health',
   'skill_brain_first',
   'skill_conformance',
   'whoknows_health',
@@ -140,17 +142,24 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_clones',
   'pgbouncer_prepare',
   'pgvector',
+  'pool_budget',
   'progressive_batch_audit_health',
   'queue_health',
   'reranker_health',
   'rls',
   'rls_event_trigger',
   'search_mode',
+  'pool_reap_health',
+  'self_upgrade_health',
   'stale_locks',
   'subagent_capability',
   'subagent_health',
   'supervisor',
+  'supervisor_niceness',
+  'supervisor_singleton',
   'sync_consolidation',
+  'wedged_queue',
+  'worker_oom_loop',
   'ze_embedding_health',
 ]);
 
@@ -171,6 +180,7 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'schema_version',
   'slug_fallback_audit',
   'type_proliferation',
+  'timeline_dedup_index',
   'upgrade_errors',
 ]);
 
