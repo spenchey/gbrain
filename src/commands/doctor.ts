@@ -3400,7 +3400,10 @@ export async function checkSyncFreshness(
     }>(
       // v0.41.32.0: newest_content_at feeds the REMOTE (non-localOnly) lag so
       // doctorReportRemote never shells out to git on a DB-supplied local_path.
-      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version, newest_content_at FROM sources WHERE local_path IS NOT NULL`,
+      `SELECT id, name, local_path, last_sync_at, last_commit, chunker_version, newest_content_at
+         FROM sources
+        WHERE archived IS NOT TRUE
+          AND local_path IS NOT NULL`,
     );
 
     if (sources.length === 0) {
