@@ -3426,6 +3426,7 @@ export async function computeConversationFactsBacklogCheck(
          WHERE p.type = ANY($1::text[])
            AND p.deleted_at IS NULL
            AND COALESCE(BTRIM(p.frontmatter->>'raw_transcript'), '') = ''
+           AND COALESCE(BTRIM(p.frontmatter->>'conversation_facts'), '') <> 'skip'
            AND p.content_hash IS NOT NULL
          GROUP BY p.source_id, p.slug
        )

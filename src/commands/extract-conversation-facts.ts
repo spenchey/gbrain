@@ -1313,6 +1313,10 @@ export async function runExtractConversationFactsCore(
         result.pages_skipped++;
         return;
       }
+      if (page.frontmatter?.conversation_facts === 'skip') {
+        result.pages_skipped_non_extractable++;
+        return;
+      }
 
       await processPageWithLock(page);
     } else {
@@ -1338,7 +1342,9 @@ export async function runExtractConversationFactsCore(
           });
           if (batch.length === 0) break;
 
-          let claimable = batch;
+          let claimable = batch.filter(
+            (page) => page.frontmatter?.conversation_facts !== 'skip',
+          );
           // Checkpoints are an intra-page cursor; fresh durable outcomes are
           // the page-level selection authority and survive checkpoint GC.
           if (!opts.force && claimable.length > 0) {
