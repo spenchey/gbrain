@@ -35,10 +35,11 @@
  *
  * The doctor renders both side by side.
  *
- * Drift contract: every check name that ships in doctor.ts MUST appear in
+ * Drift contract: every check name that ships through doctor MUST appear in
  * exactly one set below. The drift-guard test in
- * `test/doctor-categories.test.ts` enforces this by reading doctor.ts source
- * via a tagged-string scan and asserting set membership exactly.
+ * `test/doctor-categories.test.ts` enforces this by reading doctor check
+ * emitter sources via a tagged-string scan and asserting set membership
+ * exactly.
  *
  * If you add a new doctor check, you MUST add its name to the appropriate
  * set here. The categorize step in `src/commands/doctor.ts` falls through
@@ -67,7 +68,9 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'conversation_parser_probe_health',
   'cross_modal_modality_backfill',
   'cycle_freshness',
+  'dangling_aliases',
   'effective_date_health',
+  'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
   'embedding_provider',
@@ -97,9 +100,11 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'orphan_ratio',
   'oversized_pages',
   'quarantined_pages',
+  'raw_provenance',
   'flagged_pages',
   'salience_health',
   'scraper_junk_pages',
+  'source_config_shape',
   'source_routing_health',
   'stub_guard_24h',
   'sync_failures',
@@ -108,6 +113,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'takes_weight_grid',
   'timeline_coverage',
   'unified_multimodal_coverage',
+  'unverified_extractions',
   'voice_gate_health',
 ]);
 
@@ -183,6 +189,7 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'slug_fallback_audit',
   'type_proliferation',
   'timeline_dedup_index',
+  'type_proliferation',
   'upgrade_errors',
 ]);
 
