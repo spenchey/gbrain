@@ -5067,7 +5067,10 @@ export async function buildChecks(
     const { hostname } = await import('os');
 
     const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
-    const lastStarted = events.filter(e => e.event === 'started').pop() as
+    const configuredQueue = process.env.GBRAIN_SUPERVISOR_QUEUE;
+    const lastStarted = events.filter(e =>
+      e.event === 'started' && (configuredQueue === undefined || e.queue === configuredQueue),
+    ).pop() as
       | (Record<string, unknown> & { ts?: string })
       | undefined;
 
@@ -5076,7 +5079,11 @@ export async function buildChecks(
     if (lastStarted && engine) {
       const queue = typeof lastStarted.queue === 'string' ? lastStarted.queue : 'default';
       const effectiveMaxRss = typeof lastStarted.max_rss_mb === 'number' ? lastStarted.max_rss_mb : null;
-      const localPid = readSupervisorPid(DEFAULT_PID_FILE).pid;
+    // A deployment can intentionally run a named queue supervisor rather than
+    // the HOME-derived default. Use the same explicit pidfile override as the
+    // liveness check so the singleton check compares like with like.
+    const supervisorPidFile = process.env.GBRAIN_SUPERVISOR_PID_FILE ?? DEFAULT_PID_FILE;
+    const localPid = readSupervisorPid(supervisorPidFile).pid;
       const localHost = hostname();
 
       // Read the DB singleton lock holder for this queue.
@@ -6432,7 +6439,6 @@ export async function buildChecks(
   // doctor (no --source) stays brain-wide.
   progress.heartbeat('orphan_ratio');
   try {
-    const { getOrphansData } = await import('./orphans.ts');
     const srcId = orphanRatioSourceId;
     const inSource = srcId ? ` in source '${srcId}'` : '';
     const entityCount = (await engine.executeRaw<{ count: number }>(
@@ -6452,7 +6458,23 @@ export async function buildChecks(
       // about one source — answer it even below 100 entities, with a
       // low-scale caveat, instead of swallowing a real per-source failure
       // (e.g. 80 fully-orphaned entity pages) behind a vacuous "ok".
-      const data = await getOrphansData(engine, { includePseudo: false, sourceId: srcId });
+      // The doctor needs counts, not the full orphan metadata list. On large
+      // brains, materializing every orphan page turns a health probe into a
+      // multi-minute transfer and can exhaust the client pool.
+      const scope = srcId ? ' AND p.source_id = $1' : '';
+      const rows = await engine.executeRaw<{ total_orphans: number; total_linkable: number }>(
+        `SELECT
+           COUNT(*) FILTER (WHERE NOT EXISTS (
+             SELECT 1 FROM links l
+             JOIN pages src ON src.id = l.from_page_id
+             WHERE l.to_page_id = p.id AND src.deleted_at IS NULL
+           ))::int AS total_orphans,
+           COUNT(*)::int AS total_linkable
+         FROM pages p
+         WHERE p.deleted_at IS NULL${scope}`,
+        srcId ? [srcId] : [],
+      );
+      const data = rows[0] ?? { total_orphans: 0, total_linkable: 0 };
       const ratio = data.total_linkable > 0 ? data.total_orphans / data.total_linkable : 0;
       const pct = (ratio * 100).toFixed(0);
       const caveat =
