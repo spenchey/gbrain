@@ -524,6 +524,8 @@ export class MinionSupervisor {
   private readonly tiniPath: string;
   private stopping = false;
   private healthInFlight = false;
+  /** Rate-limit the no-completion worker restart path. */
+  private lastHealthRestartAt = 0;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private exitListener: (() => void) | null = null;
   private sigtermListener: (() => void) | null = null;
@@ -1154,26 +1156,26 @@ export class MinionSupervisor {
         });
       }
 
-      if (waitingCount > 0 && minutesSinceCompletion !== null && minutesSinceCompletion > 30) {
+      if (waitingClaimableCount > 0 && minutesSinceClaimable !== null && minutesSinceClaimable > 30) {
         this.emit('health_warn', {
           reason: 'no_recent_completions',
-          waiting_count: waitingCount,
-          active_count: activeCount,
-          minutes_since_completion: minutesSinceCompletion,
+          waiting_count: waitingClaimableCount,
+          active_count: activeHealthyCount,
+          minutes_since_completion: minutesSinceClaimable,
           queue: this.opts.queue,
         });
 
         const csForRestart = this.childSupervisor;
         const workerAlive = csForRestart !== null && csForRestart.childAlive;
         const restartCooldownMs = 5 * 60 * 1000;
-        const restartDue = now - this.lastHealthRestartAt > restartCooldownMs;
-        if (activeCount === 0 && workerAlive && !this.stopping && restartDue) {
+        const restartDue = false;// The wedge watchdog below is the sole restart authority for claimable work.
+        if (activeHealthyCount === 0 && workerAlive && !this.stopping && restartDue) {
           this.lastHealthRestartAt = now;
           this.emit('health_warn', {
             reason: 'restarting_worker_no_recent_completions',
-            waiting_count: waitingCount,
-            active_count: activeCount,
-            minutes_since_completion: minutesSinceCompletion,
+            waiting_count: waitingClaimableCount,
+            active_count: activeHealthyCount,
+            minutes_since_completion: minutesSinceClaimable,
             queue: this.opts.queue,
           });
           try {

@@ -13,6 +13,7 @@ storage:
   # content. .gitignored automatically by `gbrain sync`. Restorable from the DB
   # via `gbrain export --restore-only`.
   db_only:
+    - media/
     - media/x/
     - media/articles/
     - meetings/transcripts/
