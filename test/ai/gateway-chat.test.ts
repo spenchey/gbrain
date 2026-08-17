@@ -45,14 +45,15 @@ describe('chat touchpoint — recipe registry', () => {
     }
   });
 
-  test('only Anthropic and model-family-gated OpenRouter claim supports_prompt_cache', () => {
+  test('only Anthropic claims supports_prompt_cache outright; others gate per model', () => {
     for (const r of listRecipes()) {
       if (!r.touchpoints.chat) continue;
       if (r.id === 'anthropic') {
         expect(r.touchpoints.chat.supports_prompt_cache).toBe(true);
-      } else if (r.id === 'openrouter') {
-        // Family-scoped predicate (openai/* + anthropic/claude-*), never a
-        // blanket true — see recipe-openrouter.test.ts for the model matrix.
+      } else if (r.id === 'openrouter' || r.id === 'google') {
+        // Scoped predicates, never a blanket true: OpenRouter by routed model
+        // family (openai/* + anthropic/claude-*), Google by Gemini version
+        // (implicit caching is 2.5+). Matrices live in each recipe's test.
         expect(typeof r.touchpoints.chat.supports_prompt_cache).toBe('function');
       } else {
         expect(r.touchpoints.chat.supports_prompt_cache ?? false).toBe(false);
@@ -176,14 +177,15 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
       .toThrow(AIConfigError);
   });
 
-  test('assertTouchpoint rejects unknown native model with the model list in the fix hint', () => {
-    try {
-      assertTouchpoint(getRecipe('anthropic')!, 'chat', 'claude-opus-9-99');
-      throw new Error('should have thrown');
-    } catch (e) {
-      expect(e).toBeInstanceOf(AIConfigError);
-      expect((e as AIConfigError).message).toContain('claude-opus-9-99');
-    }
+  test('assertTouchpoint accepts unlisted models on native recipes (no runtime allowlist)', () => {
+    // Frontier models ship weekly; recipe models: arrays are informational
+    // (defaults, guard-test fixtures, display), not a gate. A nonexistent id
+    // surfaces as the provider's own model_not_found at call time.
+    expect(() => assertTouchpoint(getRecipe('anthropic')!, 'chat', 'claude-opus-9-99')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.6-sol')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('google')!, 'chat', 'gemini-9-flash')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'expansion', 'gpt-5.6-luna')).not.toThrow();
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'embedding', 'text-embedding-9-huge')).not.toThrow();
   });
 
   test('assertTouchpoint accepts arbitrary model on openai-compat tier', () => {

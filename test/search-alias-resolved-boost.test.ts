@@ -89,7 +89,7 @@ describe('alias_resolved boost stage', () => {
 });
 
 describe('KNOBS_HASH_VERSION', () => {
-  it('is 14 (13→14 compiled_truth boost no longer applies at detail=medium, so pre-fix rankings must be unreachable, #3430)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(14);
+  it('is 18 (16→17 degradation-stamp epoch; 17→18 autocut weak-top floor #1863)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(18);
   });
 });
