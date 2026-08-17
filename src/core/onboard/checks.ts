@@ -359,16 +359,18 @@ export async function checkTakesCount(
 export async function runAllOnboardChecks(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult[]> {
-  return Promise.all([
-    checkEmbedStaleness(engine),
-    checkEntityLinkCoverage(engine),
-    checkTimelineCoverage(engine),
-    checkTakesCount(engine),
-    // v0.42 type-unification (T13-T15): 3 new checks added to onboard.
-    checkPackUpgradeAvailable(engine),
-    checkTypeProliferation(engine),
-    checkDanglingAliases(engine),
-  ]);
+  const checks = [
+    checkEmbedStaleness,
+    checkEntityLinkCoverage,
+    checkTimelineCoverage,
+    checkTakesCount,
+    checkPackUpgradeAvailable,
+    checkTypeProliferation,
+    checkDanglingAliases,
+  ];
+  const results: OnboardCheckResult[] = [];
+  for (const check of checks) results.push(await check(engine));
+  return results;
 }
 
 // ===========================================================================
