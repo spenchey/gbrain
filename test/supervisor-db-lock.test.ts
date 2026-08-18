@@ -84,9 +84,17 @@ describe('#1849 classifySupervisorSingleton (doctor)', () => {
     })).toBe('mismatch');
   });
 
-  test('same pid but DIFFERENT host → mismatch (bare pid is meaningless cross-host)', () => {
+  test('same live local pid under a DIFFERENT hostname alias → single', () => {
     expect(classifySupervisorSingleton({
-      lockLive: true, lockHolderHost: 'other', lockHolderPid: 42, localHost: 'box', localPid: 42,
+      lockLive: true, lockHolderHost: 'box.local', lockHolderPid: 42,
+      localHost: 'box.tailnet.ts.net', localPid: 42, localPidAlive: true,
+    })).toBe('single');
+  });
+
+  test('same pid on a DIFFERENT host without local liveness proof → mismatch', () => {
+    expect(classifySupervisorSingleton({
+      lockLive: true, lockHolderHost: 'other', lockHolderPid: 42,
+      localHost: 'box', localPid: 42, localPidAlive: false,
     })).toBe('mismatch');
   });
 

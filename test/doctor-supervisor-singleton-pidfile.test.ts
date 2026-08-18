@@ -116,6 +116,21 @@ describe('doctor supervisor_singleton — honors the recorded pid_file (custom -
       expect(check?.message).toContain('singleton lock is held by');
     });
   });
+
+  test('hostname aliases for the same live local pid do not create a false duplicate warning', async () => {
+    await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () => {
+      const customPidFile = path.join(pidFileDir, 'aliased-supervisor.pid');
+      fs.writeFileSync(customPidFile, String(process.pid), 'utf8');
+      writeStartedEvent({ pid_file: customPidFile, queue: 'default', max_rss_mb: 512 });
+
+      await holdLiveLock('default', process.pid, `${os.hostname()}.tailnet-alias`);
+
+      const check = await findSingletonCheck();
+      expect(check).toBeDefined();
+      expect(check?.status).toBe('ok');
+      expect(check?.message).toContain('Single supervisor');
+    });
+  });
 });
 
 // Compatibility fallback: a 'started' event from before this fix (or any

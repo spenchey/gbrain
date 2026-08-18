@@ -863,7 +863,8 @@ export async function buildChecks(
   // --pid-file on a pre-fix binary), the lock holder's (host, pid) won't match
   // the local pidfile. Surface that mismatch + the effective --max-rss (the cap
   // a rogue supervisor would have fought over). Bare pid is meaningless across
-  // hosts/containers, so we compare host+pid (Codex #25).
+  // hosts/containers, so hostname aliases are accepted only when the same pid
+  // is confirmed alive in the local process namespace.
   try {
     const { DEFAULT_PID_FILE, supervisorLockId, classifySupervisorSingleton } = await import('../core/minions/supervisor.ts');
     const { readSupervisorEvents } = await import('../core/minions/handlers/supervisor-audit.ts');
@@ -894,6 +895,15 @@ export async function buildChecks(
           : DEFAULT_PID_FILE);
       const localPid = readSupervisorPid(pidFilePath).pid;
       const localHost = hostname();
+      let localPidAlive = false;
+      if (localPid !== null) {
+        try {
+          process.kill(localPid, 0);
+          localPidAlive = true;
+        } catch {
+          // A stale or inaccessible pid cannot prove that hostnames are aliases.
+        }
+      }
 
       // Read the DB singleton lock holder for this queue.
       const lockRows = await engine.executeRaw<{ holder_pid: number; holder_host: string; live: boolean }>(
@@ -910,6 +920,7 @@ export async function buildChecks(
         lockHolderPid: lock?.holder_pid ?? null,
         localHost,
         localPid,
+        localPidAlive,
       });
       if (verdict === 'mismatch') {
         checks.push({

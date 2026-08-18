@@ -488,8 +488,10 @@ export function supervisorLockId(queue: string): string {
 
 /**
  * #1849 (doctor): pure classification of the supervisor singleton state from
- * the DB lock holder vs the local pidfile holder. Compares host+pid (bare pid
- * is meaningless across hosts/containers — Codex #25).
+ * the DB lock holder vs the local pidfile holder. Normally compares host+pid
+ * because a bare pid is meaningless across hosts/containers. Host aliases are
+ * accepted only when the matching pid is proven alive in the local process
+ * namespace.
  *
  *   - `no_lock`  — no live lock holder (nothing to assert).
  *   - `single`   — the live lock holder IS the local pidfile holder. Healthy.
@@ -502,12 +504,17 @@ export function classifySupervisorSingleton(args: {
   lockHolderPid: number | null;
   localHost: string;
   localPid: number | null;
+  localPidAlive?: boolean;
 }): 'no_lock' | 'single' | 'mismatch' {
   if (!args.lockLive || args.lockHolderHost === null || args.lockHolderPid === null) {
     return 'no_lock';
   }
   if (args.localPid === null) return 'mismatch';
-  const matches = args.lockHolderHost === args.localHost && args.lockHolderPid === args.localPid;
+  const samePid = args.lockHolderPid === args.localPid;
+  const matches = samePid && (
+    args.lockHolderHost === args.localHost
+    || args.localPidAlive === true
+  );
   return matches ? 'single' : 'mismatch';
 }
 
