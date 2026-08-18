@@ -795,6 +795,12 @@ export async function buildChecks(
 
     const events = readSupervisorEvents({ sinceMs: 24 * 60 * 60 * 1000 });
     const lastStart = events.filter(e => e.event === 'started').pop()?.ts ?? null;
+    // A successful restart begins a new operational epoch. Incidents from a
+    // completed run remain in the audit trail, but must not keep the current
+    // live supervisor unhealthy for the rest of the 24-hour lookback window.
+    const currentRunEvents = lastStart
+      ? events.filter(e => e.ts >= lastStart)
+      : events;
     // Shared classifier — same code path runs in `gbrain jobs supervisor
     // status` (src/commands/jobs.ts). Counts only events whose `likely_cause`
     // is NOT in the clean denylist (clean_exit, graceful_shutdown). Pre-v0.34
@@ -806,10 +812,10 @@ export async function buildChecks(
     // (runtime) without grep'ing JSONL. `classifyWorkerExit` is still
     // used by the supervisor's internal restart policy where the binary
     // shape is the right contract.
-    const summary = summarizeCrashes(events);
+    const summary = summarizeCrashes(currentRunEvents);
     const crashes24h = summary.total;
     const causeStr = `runtime=${summary.by_cause.runtime_error} oom=${summary.by_cause.oom_or_external_kill} rss=${summary.by_cause.rss_watchdog} unknown=${summary.by_cause.unknown} legacy=${summary.by_cause.legacy}${summary.by_cause.rss_watchdog > 0 ? ' (see worker_oom_loop)' : ''}`;
-    const maxCrashesEvent = events.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
+    const maxCrashesEvent = currentRunEvents.filter(e => e.event === 'max_crashes_exceeded').pop() ?? null;
 
     // Only surface a Check if the supervisor was ever observed (stops the
     // "never used the supervisor" install from getting a warn about it).
@@ -2799,6 +2805,7 @@ export async function buildChecks(
              octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, '')) AS bytes
       FROM pages p
       WHERE p.deleted_at IS NULL
+        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (octet_length(p.compiled_truth) + octet_length(COALESCE(p.timeline, ''))) > ${bytesBlock}
       ORDER BY bytes DESC
       LIMIT 100

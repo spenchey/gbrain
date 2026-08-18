@@ -544,12 +544,49 @@ export async function computeExtractHealthCheck(
       round_completed_count: number;
       halt_rate: number;
       last_updated_at: string | null;
+      last_success_at: string | null;
+      recovered: boolean;
     };
+
+    type ReceiptRow = {
+      kind: string;
+      last_success_at: Date | string | null;
+    };
+    const receiptRows = await engine.executeRaw<ReceiptRow>(
+      `SELECT
+         frontmatter->>'kind' AS kind,
+         MAX((frontmatter->>'extracted_at')::timestamptz) AS last_success_at
+       FROM pages
+       WHERE type = 'extract_receipt'
+         AND deleted_at IS NULL
+         AND (frontmatter->>'extracted_at')::timestamptz >= NOW() - INTERVAL '7 days'
+         AND COALESCE((frontmatter->>'total_rows')::int, 0) > 0
+       GROUP BY frontmatter->>'kind'`,
+      [],
+    );
+    const latestSuccessByKind = new Map(
+      receiptRows.map(r => [
+        r.kind,
+        r.last_success_at ? new Date(r.last_success_at).toISOString() : null,
+      ]),
+    );
+
+    // A successful extractor writes its receipt immediately before updating
+    // the rollup. Treat a receipt within this narrow window as proof that the
+    // latest attempt recovered. Historical halt counts remain in details.
+    const RECOVERY_RECEIPT_WINDOW_MS = 30_000;
 
     const kinds: KindAggregate[] = rows.map(r => {
       const halts = Number(r.halt_count) || 0;
       const completed = Number(r.round_completed_count) || 0;
       const total = halts + completed;
+      const lastUpdatedAt = r.last_updated_at
+        ? new Date(r.last_updated_at).toISOString()
+        : null;
+      const lastSuccessAt = latestSuccessByKind.get(r.kind) ?? null;
+      const recovered = !!lastUpdatedAt && !!lastSuccessAt &&
+        Math.abs(new Date(lastUpdatedAt).getTime() - new Date(lastSuccessAt).getTime()) <=
+          RECOVERY_RECEIPT_WINDOW_MS;
       return {
         kind: r.kind,
         cost_7d_usd: Number(r.cost_7d_usd) || 0,
@@ -558,9 +595,9 @@ export async function computeExtractHealthCheck(
         halt_count: halts,
         round_completed_count: completed,
         halt_rate: total > 0 ? halts / total : 0,
-        last_updated_at: r.last_updated_at
-          ? new Date(r.last_updated_at).toISOString()
-          : null,
+        last_updated_at: lastUpdatedAt,
+        last_success_at: lastSuccessAt,
+        recovered,
       };
     });
 
@@ -571,7 +608,8 @@ export async function computeExtractHealthCheck(
 
     // High halt rates: per F-OUT-19 doctor surfaces extractor health
     // distinctly from rollup write health.
-    const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10);
+    const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10 && !k.recovered);
+    const recoveredHighHaltKinds = kinds.filter(k => k.halt_rate > 0.10 && k.recovered);
 
     if (highHaltKinds.length > 0) {
       const top3 = [...highHaltKinds]
@@ -607,7 +645,9 @@ export async function computeExtractHealthCheck(
     return {
       name,
       status: 'ok',
-      message: `${kinds.length} kind(s) tracked, all halt rates below 10%`,
+      message: recoveredHighHaltKinds.length > 0
+        ? `${kinds.length} kind(s) tracked; ${recoveredHighHaltKinds.length} high historical halt rate(s) recovered by the latest successful receipt`
+        : `${kinds.length} kind(s) tracked, all halt rates below 10%`,
       details: {
         schema_version: 1,
         kinds,

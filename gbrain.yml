@@ -17,3 +17,32 @@ storage:
     - media/x/
     - media/articles/
     - meetings/transcripts/
+    # Machine-derived knowledge and historical import batches. These are
+    # intentionally database-canonical and restorable with gbrain export.
+    - topics/
+    - archive/
+    - pages/
+    - meta-roas-daily/
+    - meta-catalog-sync/
+    - meta-just-sold/
+    - meta-new-arrivals/
+    - 20260522/
+    - 20260523/
+    - 20260524/
+    - 20260529/
+    - 20260531/
+    - 20260602/
+    - 20260603/
+    - 20260604/
+    - 20260611/
+    - 20260614/
+    - 20260615/
+    - 20260617/
+    - 20260622/
+    - 20260624/
+    - 20260627/
+    - 20260629/
+    - 20260716/
+    - 20260717/
+    - 20260719/
+    - 20260721/

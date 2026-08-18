@@ -78,6 +78,14 @@ describe('deriveDirectUrl', () => {
     );
     expect(direct).toContain('?prepare=false');
   });
+
+  test('strips the Supavisor-only pool_size parameter from direct URLs', () => {
+    const direct = deriveDirectUrl(
+      'postgresql://postgres.ref:p@aws.pooler.supabase.com:6543/db?pool_size=15&prepare=false'
+    );
+    expect(direct).not.toContain('pool_size');
+    expect(direct).toContain('prepare=false');
+  });
 });
 
 describe('normalizeDirectUrl', () => {

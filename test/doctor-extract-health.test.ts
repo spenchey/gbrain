@@ -26,6 +26,7 @@ afterAll(async () => {
 
 async function clearRollup() {
   await engine.executeRaw('DELETE FROM extract_rollup_7d', []);
+  await engine.executeRaw(`DELETE FROM pages WHERE type = 'extract_receipt'`, []);
 }
 
 describe('computeExtractHealthCheck — empty + happy paths', () => {
@@ -54,6 +55,31 @@ describe('computeExtractHealthCheck — empty + happy paths', () => {
     expect((check.details as any)?.kinds[0].cost_7d_usd).toBeCloseTo(1.23, 4);
     expect((check.details as any)?.kinds[0].halt_rate).toBe(0);
   });
+
+  test('latest successful receipt resolves a historical high halt rate', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'agent', CURRENT_DATE, 0.20, 0, 0, 4, 1, 0, NOW())`,
+      [],
+    );
+    await engine.putPage('extracts/recovery/atoms', {
+      type: 'extract_receipt',
+      title: 'atoms recovery',
+      compiled_truth: 'Successful atoms extraction.',
+      frontmatter: {
+        kind: 'atoms',
+        extracted_at: new Date().toISOString(),
+        total_rows: 3,
+      },
+    });
+
+    const check = await computeExtractHealthCheck(engine);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('recovered');
+    expect((check.details as any)?.kinds[0].halt_rate).toBe(0.8);
+    expect((check.details as any)?.kinds[0].recovered).toBe(true);
+  });
 });
 
 describe('computeExtractHealthCheck — WARN paths', () => {
@@ -71,6 +97,30 @@ describe('computeExtractHealthCheck — WARN paths', () => {
     expect(check.message).toContain('facts.conversation');
     expect(check.message).toContain('50');
     expect((check.details as any)?.kinds[0].halt_rate).toBe(0.5);
+  });
+
+  test('older successful receipt does not hide a newer halt', async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'agent', CURRENT_DATE, 0.20, 0, 0, 4, 1, 0, NOW())`,
+      [],
+    );
+    await engine.putPage('extracts/stale-success/atoms', {
+      type: 'extract_receipt',
+      title: 'old atoms success',
+      compiled_truth: 'An older successful atoms extraction.',
+      frontmatter: {
+        kind: 'atoms',
+        extracted_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+        total_rows: 3,
+      },
+    });
+
+    const check = await computeExtractHealthCheck(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('atoms');
+    expect((check.details as any)?.kinds[0].recovered).toBe(false);
   });
 
   test('multiple kinds with high halt rate: top-3 listed in message', async () => {

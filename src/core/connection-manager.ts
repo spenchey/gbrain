@@ -154,6 +154,11 @@ export function deriveDirectUrl(url: string): string | null {
     // Compose direct URL by swapping host + port. Preserve auth, db, query.
     parsed.hostname = directHost;
     parsed.port = '5432';
+    // Supavisor accepts pool_size as a pooler-specific startup parameter,
+    // but PostgreSQL's direct endpoint rejects it with SQLSTATE 42704.
+    // Preserve ordinary connection options while removing this one
+    // transaction-pooler-only parameter from the derived direct URL.
+    parsed.searchParams.delete('pool_size');
     // Reconstruct with the original scheme.
     const scheme = url.match(/^postgres(?:ql)?:\/\//i)?.[0] ?? 'postgres://';
     const auth = directUser
