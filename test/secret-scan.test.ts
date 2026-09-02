@@ -31,6 +31,11 @@ const SLACK = 'xoxb-' + '123456789012-abcdefABCDEF';
 const AWS = 'AKIA' + 'IOSFODNN7EXAMPLE';
 const GBRAIN_HEX = '0123456789abcdef'.repeat(4);
 const PEM = '-----BEGIN RSA PRIVATE KEY-----';
+const SUPABASE = 'sbp_' + 'abcdef0123456789'.repeat(2) + 'deadbeef';       // 40 lower hex
+const LINEAR = 'lin_api_' + 'Qw3Rt5Yu7Io9Pa1Sd3Fg5Hj7Kl9Zx1Cv3Bn5Mq7W';   // 40 alnum
+const XAPP = 'xapp-1-' + 'A0AAAA0AAAA-1234567890123-' + 'ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56abcd';
+const PAPERCLIP = 'pcp_' + 'Zz1_Yy2-Xx3wV4uT5s';
+const DB_URL = 'postgres://app_user:sUp3r-S3cret_pw@db.example.com:5432/appdb';
 
 let tmp: string | null = null;
 afterEach(() => {
@@ -134,6 +139,71 @@ describe('scanText — pattern classes', () => {
     const [b] = scanText(`totally different context ${OPENAI} here`);
     expect(a!.fingerprint).toMatch(/^sha256:[0-9a-f]{16}$/);
     expect(a!.fingerprint).toBe(b!.fingerprint);
+  });
+});
+
+describe('extended pattern classes (supabase/linear/slack-app/paperclip/db-url)', () => {
+  test('each new pattern fires with its own name, value never leaks', () => {
+    for (const [expected, fixture] of [
+      ['supabase_pat', SUPABASE],
+      ['linear_api', LINEAR],
+      ['slack_app', XAPP],
+      ['paperclip', PAPERCLIP],
+      ['db_url_password', DB_URL],
+    ] as const) {
+      const findings = scanText(`cfg=${fixture}`);
+      expect(findings.map((f) => f.pattern)).toEqual([expected]);
+      expect(JSON.stringify(findings).includes(fixture)).toBe(false);
+      expect(findings[0]!.redactedPreview).toContain(`<REDACTED:${expected}>`);
+    }
+  });
+
+  test('an xapp token is NOT claimed by the xox[baprs] slack pattern', () => {
+    expect(scanText(`app token ${XAPP}`).map((f) => f.pattern)).toEqual(['slack_app']);
+  });
+
+  test('db_url_password fires on postgres://, postgresql:// and mysql://', () => {
+    for (const scheme of ['postgres', 'postgresql', 'mysql']) {
+      const url = `${scheme}://svc:hunter2-hunter2@db.internal:5432/main`;
+      expect(scanText(`u=${url}`).map((f) => f.pattern)).toEqual(['db_url_password']);
+    }
+  });
+
+  test('redactFindings scrubs the WHOLE connection URL — host and user included', () => {
+    const { text: out, redactions } = redactFindings(`export DATABASE_URL="${DB_URL}"\n`);
+    expect(out).toBe('export DATABASE_URL="<REDACTED:db_url_password>"\n');
+    expect(out.includes('db.example.com')).toBe(false);
+    expect(out.includes('sUp3r-S3cret_pw')).toBe(false);
+    expect(redactions.map((r) => r.pattern)).toEqual(['db_url_password']);
+  });
+
+  test('a URL embedding another pattern-shaped password stays ONE db_url_password span', () => {
+    // Ordering guarantee: db_url_password leads CORE_PATTERNS, so the full-URL
+    // span claims first and the embedded anthropic-shaped password can't
+    // split the finding (which would leave user+host behind after redaction).
+    const url = `postgres://svc:${ANTHROPIC}@db.internal:6543/app`;
+    const findings = scanText(`u=${url}`);
+    expect(findings.map((f) => f.pattern)).toEqual(['db_url_password']);
+    const { text: out } = redactFindings(`u=${url}\n`);
+    expect(out).toBe('u=<REDACTED:db_url_password>\n');
+  });
+
+  test('benign lookalikes do not fire', () => {
+    const text = [
+      'sbp_short is not a token',
+      `sbp_${'ABCDEF0123456789'.repeat(2)}DEADBEEF has an uppercase body`, // not lower hex
+      `risksbp_${'abcdef0123456789'.repeat(2)}deadbeef embedded in a word`, // no left boundary
+      'lin_api_short misses the floor',
+      'the linear_api pattern name itself',
+      'xapproved by the committee',
+      'xapp-not-a-token',
+      'pcp_tiny',
+      'postgres://localhost:5432/mydb',            // port, not a password (no @)
+      'postgres://app_user@db.example.com/appdb',  // user but NO password
+      'read the postgresql:// docs',
+      'mysql://host/db',
+    ].join('\n');
+    expect(scanText(text)).toEqual([]);
   });
 });
 
