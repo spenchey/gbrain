@@ -66,9 +66,10 @@ export const SCAN_ALLOW_FILENAME = '.gbrain-scan-allow';
 //
 // Each core pattern is compiled with a left boundary group `(^|[^A-Za-z0-9_])`
 // so prefixes embedded inside longer identifiers ("risk-assessment…",
-// "task-…") never fire. Order matters: 'anthropic' precedes 'openai' and the
-// per-line claimed-span set prevents a `sk-ant-…` key from double-reporting
-// as a generic `sk-` match.
+// "task-…") never fire. Order matters: 'db_url_password' leads so its
+// whole-URL span claims before any embedded token pattern; 'anthropic'
+// precedes 'openai' and the per-line claimed-span set prevents a `sk-ant-…`
+// key from double-reporting as a generic `sk-` match.
 
 interface CompiledPattern {
   name: string;
@@ -78,6 +79,22 @@ interface CompiledPattern {
 }
 
 const CORE_PATTERNS: ReadonlyArray<{ name: string; source: string }> = [
+  // DB connection URL with an inline password: the WHOLE URL is the secret —
+  // user, host, port and db name identify a working target, so redacting only
+  // the password would still ship a probe map. Ordered FIRST so its full-URL
+  // span claims before any narrower pattern can grab an embedded token
+  // (claimed-span dedupe is first-claim-wins): `postgres://u:sk-ant-…@h/db`
+  // must report/redact as ONE db_url_password span, not a bare anthropic hit
+  // with the rest of the URL left behind. The username class excludes `:` `/`
+  // `@` so a password-less URL (`postgres://host:5432/db`, `postgres://u@h`)
+  // can never match — the mandatory `:password@` is the trigger. The host
+  // tail excludes whitespace and quote chars so a quoted URL doesn't swallow
+  // its closing quote. Non-capturing groups only (compilePatterns wraps the
+  // source; group 2 must span the whole secret).
+  {
+    name: 'db_url_password',
+    source: '(?:postgres(?:ql)?|mysql)://[^:/@\\s]+:[^@\\s]+@[^\\s"\'`]+',
+  },
   { name: 'anthropic', source: 'sk-ant-[A-Za-z0-9_-]{16,}' },
   // Prefixed OpenAI forms (sk-proj-/sk-svcacct-/sk-None-) allow `_`/`-` in the
   // body, which the bare sk- pattern below deliberately does not. Ordered
@@ -89,7 +106,18 @@ const CORE_PATTERNS: ReadonlyArray<{ name: string; source: string }> = [
   { name: 'github_pat', source: 'github_pat_[A-Za-z0-9_]{22,}' },
   { name: 'github_token', source: 'gh[pousr]_[A-Za-z0-9]{36,}' },
   { name: 'slack', source: 'xox[baprs]-[A-Za-z0-9-]{10,}' },
+  // Slack app-level tokens (Socket Mode): xapp-<digit>-… — the xox[baprs]
+  // class above does NOT cover the xapp prefix. Real tokens run ~93 chars of
+  // [A-Za-z0-9-] after the prefix; 20 is a comfortable floor.
+  { name: 'slack_app', source: 'xapp-[0-9]-[A-Za-z0-9-]{20,}' },
   { name: 'aws_access_key', source: 'AKIA[0-9A-Z]{16}' },
+  // Supabase personal access tokens: sbp_ + exactly 40 lowercase hex
+  // (verified against a live token's shape).
+  { name: 'supabase_pat', source: 'sbp_[0-9a-f]{40}' },
+  // Linear API keys: lin_api_ + 40 alphanumeric observed; floor at 20.
+  { name: 'linear_api', source: 'lin_api_[A-Za-z0-9]{20,}' },
+  // Paperclip (house task-bus, retired but tokens persist in old transcripts).
+  { name: 'paperclip', source: 'pcp_[A-Za-z0-9_-]{12,}' },
   // gbrain's own tokens: generateToken (core/utils.ts) mints 'gbrain_' plus an
   // optional OAuth infix (at_ access / rt_ refresh / cs_ client secret /
   // code_ auth code) plus 32 random bytes hex. Without this entry the scanner
