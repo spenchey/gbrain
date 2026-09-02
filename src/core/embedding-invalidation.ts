@@ -145,25 +145,31 @@ export async function invalidateStaleSignatureEmbeddingsGuarded(
     : `p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1`;
   const batchSize = Math.max(1, opts.batchSize ?? 2000);
   let invalidated = 0;
+  let cursor = 0;
   while (true) {
-    const rows = await engine.executeRaw<{ page_id: number }>(
+    const batchParams = [...params, cursor];
+    const cursorParam = `$${batchParams.length}`;
+    const rows = await engine.executeRaw<{ chunk_id: number }>(
       `WITH candidates AS (
          SELECT cc.id
            FROM content_chunks cc
            JOIN pages p ON p.id = cc.page_id
           WHERE cc.${colId} IS NOT NULL
+            AND cc.id > ${cursorParam}
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND ${sigClause}${srcClause}
+          ORDER BY cc.id
           LIMIT ${batchSize}
        )
        UPDATE content_chunks cc
           SET ${colId} = NULL, embedded_at = NULL
          FROM candidates c
         WHERE cc.id = c.id
-       RETURNING cc.page_id`,
-      params,
+       RETURNING cc.id AS chunk_id`,
+      batchParams,
     );
     invalidated += rows.length;
+    if (rows.length > 0) cursor = Math.max(...rows.map((r) => Number(r.chunk_id)));
     if (rows.length < batchSize) return invalidated;
   }
 }
