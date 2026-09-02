@@ -748,6 +748,19 @@ export async function runJobs(engineOrNull: BrainEngine | null, args: string[]):
         try {
           const { validateShellJobParams } = await import('../core/minions/handlers/shell-validate.ts');
           validateShellJobParams(data);
+          // Secrets-at-rest fix: strip credential-shaped env entries out of
+          // the payload BEFORE queue.add persists it. Only the stripped key
+          // NAMES are stored (`env_deferred_keys`); the worker resolves each
+          // from its own local env at execution. See shell-env-defer.ts.
+          const { splitDeferredEnv } = await import('../core/minions/handlers/shell-env-defer.ts');
+          const split = splitDeferredEnv(data.env as Record<string, string> | undefined);
+          if (split.deferredKeys.length > 0) {
+            const prior = Array.isArray(data.env_deferred_keys)
+              ? (data.env_deferred_keys as unknown[]).filter((k): k is string => typeof k === 'string')
+              : [];
+            data.env = split.env;
+            data.env_deferred_keys = [...new Set([...prior, ...split.deferredKeys])].sort();
+          }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           console.error(`Error: ${msg}`);

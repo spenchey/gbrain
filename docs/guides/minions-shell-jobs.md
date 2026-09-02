@@ -112,6 +112,21 @@ Note: `--follow` blocks the crontab slot until the job finishes. If 14 shell
 crons land at the same minute and each takes 30s, they serialize through
 crontab's spawning limits. Postgres + persistent worker scales better.
 
+### Credential-shaped `env:` entries are deferred, never stored {#env-deferred}
+
+Both submit surfaces (`gbrain jobs submit shell` and the `submit_job` op) strip
+`env:` entries whose key looks credential-shaped (contains `TOKEN`, `SECRET`,
+`PASSWORD`, `API_KEY`, `DATABASE_URL`, `ACCESS_`, ends in `_KEY`, …) or whose
+value matches a well-known secret shape (Slack `xoxb-`/`xapp-`, GitHub `ghp_`
+family, Linear `lin_api_`, JWTs, `postgres://user:pass@…`). The stripped
+**key names** are recorded in `env_deferred_keys` on the job row; the values
+never reach the database. At execution the worker resolves each deferred name
+from its OWN local process environment (launchd/profile-provided) into the
+child env — so secrets live only on machines. A deferred name absent from the
+worker env is logged loudly (name only) and skipped; the job still runs.
+Legacy rows with a full plaintext `env` execute unchanged, and an explicitly
+stored `env` value always wins over the worker-local one.
+
 ### Calling `gbrain` itself from a shell job — use `inherit:` for DATABASE_URL {#secrets}
 
 A common pattern is submitting shell jobs that run `gbrain` CLI commands:
