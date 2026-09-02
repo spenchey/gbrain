@@ -2567,16 +2567,33 @@ export class PostgresEngine implements BrainEngine {
     // includeNullSignature, #3391).
     const staleColId = await this.activeEmbeddingColId({ fallbackToLegacy: true });
     const { where, params } = this.buildStaleChunkWhere(`cc.${staleColId}`, opts);
-    // RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING).
+    // Cursor the count so large vector tables never depend on one unbounded
+    // aggregate finishing inside a managed provider's statement timeout.
+    const batchSize = 2000;
     return await this.withScopedReadTransaction(undefined, opts?.sourceId, async (tx) => {
-      const rows = await tx.unsafe(
-        `SELECT count(*)::int AS count
-           FROM content_chunks cc
-           JOIN pages p ON p.id = cc.page_id
-          WHERE ${where}`,
-        params as Parameters<typeof tx.unsafe>[1],
-      );
-      return Number((rows[0] as { count?: number } | undefined)?.count ?? 0);
+      let cursor = 0;
+      let total = 0;
+      while (true) {
+        const batchParams = [...params, cursor];
+        const cursorParam = `$${batchParams.length}`;
+        const rows = await tx.unsafe(
+          `SELECT count(*)::int AS count, max(id)::text AS max_id
+             FROM (
+               SELECT cc.id
+                 FROM content_chunks cc
+                 JOIN pages p ON p.id = cc.page_id
+                WHERE ${where} AND cc.id > ${cursorParam}
+                ORDER BY cc.id
+                LIMIT ${batchSize}
+             ) stale_batch`,
+          batchParams as Parameters<typeof tx.unsafe>[1],
+        );
+        const row = rows[0] as { count?: number; max_id?: string | null } | undefined;
+        const count = Number(row?.count ?? 0);
+        total += count;
+        if (count < batchSize || !row?.max_id) return total;
+        cursor = Number(row.max_id);
+      }
     });
   }
 
