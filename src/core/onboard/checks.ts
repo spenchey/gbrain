@@ -126,10 +126,9 @@ function coverageWithConfidence(sample: EntityCoverageSample): { coverage: numbe
 export async function checkEmbedStaleness(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult> {
-  const staleCount = await safeCount(
-    engine,
-    `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
-  );
+  // Use the engine's canonical stale predicate. Raw reads of the legacy
+  // `embedding` column miscount active-width vectors and embed_skip pages.
+  const staleCount = await engine.countStaleChunks();
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';
   let message: string;

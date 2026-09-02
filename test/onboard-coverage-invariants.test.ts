@@ -10,6 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
+  checkEmbedStaleness,
   checkEntityLinkCoverage,
   checkTimelineCoverage,
 } from '../src/core/onboard/checks.ts';
@@ -57,6 +58,26 @@ async function seedVisibleAndQuarantinedEntities(): Promise<void> {
 }
 
 describe('onboard entity coverage invariants', () => {
+  test('embed staleness uses the engine stale predicate', async () => {
+    const fake = {
+      kind: 'postgres',
+      async countStaleChunks() {
+        return 0;
+      },
+      async executeRaw() {
+        throw new Error('legacy-column query must not run');
+      },
+    } as unknown as BrainEngine;
+
+    const result = await checkEmbedStaleness(fake);
+
+    expect(result.check).toEqual({
+      name: 'embed_staleness',
+      status: 'ok',
+      message: 'No stale chunks',
+    });
+  });
+
   test('uses the actual Bernoulli sample size and never emits >100% or NaN', async () => {
     const queries: string[] = [];
     let call = 0;
