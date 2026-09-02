@@ -27,14 +27,14 @@ tools:
   - write
   - edit
 mutating: true
-# This skill names other skills (perplexity-research, brain-publish,
-# etc.) in its dispatcher prose; the v0.36.x brain-first regex matches
-# the word `perplexity` but the skill never actually calls external
-# APIs. It rewrites local routing tables. Declarative opt-out.
 brain_first: exempt
 ---
 
 # Functional-Area Resolver — Pattern for Compressing Routing Tables
+
+Brain-first analyzer note: this skill names other skills such as
+`perplexity-research` in dispatcher prose, but it rewrites local routing
+tables and does not call external APIs.
 
 ## Problem
 

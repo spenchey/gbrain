@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'fs';
 import { doctorSource } from './helpers/doctor-source.ts';
 
 describe('doctor current supervisor epoch', () => {
@@ -16,8 +17,10 @@ describe('doctor current supervisor epoch', () => {
 describe('doctor accepted oversized pages', () => {
   test('embed_skip is the explicit acceptance state for non-embeddable pages', () => {
     const source = doctorSource();
-    expect(source).toContain(
-      "AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')",
+    expect(source).toContain('EMBED_SKIP_FILTER_FRAGMENT');
+    const filterSource = readFileSync(new URL('../src/core/embed-skip.ts', import.meta.url), 'utf8');
+    expect(filterSource).toContain(
+      "NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? '${EMBED_SKIP_KEY}')",
     );
   });
 });

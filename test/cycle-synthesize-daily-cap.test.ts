@@ -135,7 +135,10 @@ interface CapDetails {
   skips: Array<{ filePath: string; reason: string }>;
 }
 
-async function runPhase(rig: Rig, opts: { date?: string; excludeQueue?: string } = {}): Promise<CapDetails> {
+async function runPhase(
+  rig: Rig,
+  opts: { date?: string; excludeQueue?: string; now?: () => Date } = {},
+): Promise<CapDetails> {
   // No key + isolated GBRAIN_HOME: every seeded verdict is a cache hit, so no
   // judge call happens; the env isolation is belt-and-suspenders against a
   // dev machine whose config file carries a real key.
@@ -146,12 +149,38 @@ async function runPhase(rig: Rig, opts: { date?: string; excludeQueue?: string }
       withSubagentAutoCancel(rig.engine, () =>
         runPhaseSynthesize(rig.engine, { brainDir: rig.brainDir, dryRun: false, ...phaseOpts }),
       { excludeQueue }));
-    expect(result.status).toBe('ok');
+    // CDX-4 (#4217 family): in this keyless harness every submitted child
+    // dies, and an all-children-dead run is now an honest phase failure
+    // (fan-out details preserved). Zero-submission runs still report 'ok'.
+    // This suite's subject is the CAP accounting in details, not the phase
+    // verdict.
+    if (result.status !== 'ok') {
+      expect(result.error?.code).toBe('SYNTH_ALL_CHILDREN_DEAD');
+    }
     return result.details as unknown as CapDetails;
   } finally {
     try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* */ }
   }
 }
+
+describe('cycle summary date (#4348)', () => {
+  test('the phase buckets a UTC-evening run into the configured local day', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('cycle.timezone', 'Asia/Kolkata');
+      await seedPassingFile(rig, '2026-08-19-boundary.txt');
+
+      await runPhase(rig, {
+        now: () => new Date('2026-08-19T21:30:00.000Z'),
+      });
+
+      expect(await rig.engine.getPage('dream-cycle-summaries/2026-08-20')).not.toBeNull();
+      expect(await rig.engine.getPage('dream-cycle-summaries/2026-08-19')).toBeNull();
+    } finally {
+      await rig.cleanup();
+    }
+  }, 60_000);
+});
 
 describe('daily cap — default off (D2D)', () => {
   test('unset cap: every passing file submits, zero daily_cap skips', async () => {
@@ -246,11 +275,18 @@ describe('daily cap — engaged', () => {
     const rig = await setupRig();
     try {
       await rig.engine.setConfig('dream.synthesize.max_submissions_per_source_per_day', '1');
+      await rig.engine.setConfig('cycle.timezone', 'America/Los_Angeles');
       await seedSubmissionRow(rig, { ageHours: 1, tag: 'recent.txt' }); // cap exhausted
       await seedPassingFile(rig, '2026-08-07-g.txt');
-      const details = await runPhase(rig, { date: '2026-08-07' });
+      const details = await runPhase(rig, {
+        date: '2026-08-07',
+        now: () => new Date('2040-01-02T12:00:00.000Z'),
+      });
       expect(details.children_submitted).toBe(1);
       expect(details.skips.filter(s => s.reason.startsWith('daily_cap'))).toHaveLength(0);
+      // #4348: explicit --date beats both the clock and the configured zone.
+      expect(await rig.engine.getPage('dream-cycle-summaries/2026-08-07')).not.toBeNull();
+      expect(await rig.engine.getPage('dream-cycle-summaries/2040-01-02')).toBeNull();
     } finally {
       await rig.cleanup();
     }

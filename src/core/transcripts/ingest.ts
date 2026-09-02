@@ -18,7 +18,8 @@
  *     file continues.
  *   - RUN-LEVEL (fail-closed integrity): importFromContent duplicate-lookup
  *     or read-back failures and putRawData misses rethrow and abort the run.
- *     Heuristic seam: import errors matching /too large/ stay per-session.
+ *     Heuristic seam: import errors matching /too large|invalid byte
+ *     sequence/ stay per-session.
  *
  * Watermark: the RESULT carries `cleanScan` (no errors anywhere, no limit
  * truncation) + `maxSessionTs`; the COMMAND advances the `--since last`
@@ -94,6 +95,8 @@ export interface IngestFileOutcome {
   sessions: IngestSessionOutcome[];
   skippedLines: number;
   drift: boolean;
+  /** Adapter degraded to a bounded read (e.g. codex head+tail) — part of the file was never scanned. */
+  truncated: boolean;
   error?: string;
 }
 
@@ -108,6 +111,8 @@ export interface TranscriptsIngestResult {
   imperatives: number;
   partsDeleted: number;
   driftFiles: number;
+  /** Files whose adapter reported a truncated (partially-unscanned) read. */
+  truncatedFiles: number;
   erroredFiles: number;
   /** EVERY slug the run touched — imported AND hash-skipped (--facts targets all). */
   slugsTouched: string[];
@@ -140,7 +145,9 @@ function lastMessageTs(messages: Array<{ timestamp: string }>): string {
 const RUN_ABORT_MARKER = 'transcripts-ingest run abort';
 
 function isPerSessionImportError(err: unknown): boolean {
-  return err instanceof Error && /too large/i.test(err.message);
+  // 'invalid byte sequence' is Postgres rejecting the DATA (e.g. a U+0000 a
+  // sanitizer missed, #4392) — one bad session, never a DB-down signal.
+  return err instanceof Error && /too large|invalid byte sequence/i.test(err.message);
 }
 
 export async function runTranscriptsIngest(
@@ -158,6 +165,7 @@ export async function runTranscriptsIngest(
     imperatives: 0,
     partsDeleted: 0,
     driftFiles: 0,
+    truncatedFiles: 0,
     erroredFiles: 0,
     slugsTouched: [],
     cleanScan: true,
@@ -181,6 +189,7 @@ export async function runTranscriptsIngest(
       sessions: [],
       skippedLines: 0,
       drift: false,
+      truncated: false,
     };
     result.files.push(fileOutcome);
 
@@ -387,12 +396,13 @@ export async function runTranscriptsIngest(
       if (step.done && step.value) {
         const diag = step.value;
         fileOutcome.skippedLines = diag.skippedLines;
-        if (diag.bytesRead > 0 && diag.sessions === 0) {
+        if (diag.bytesRead > 0 && diag.sessions === 0 && !diag.expectedEmpty) {
           fileOutcome.drift = true;
           result.driftFiles++;
           // A drifting file may hold sessions a fixed parser will surface
           // later (torn hermes copy, transient format break) — the shared
-          // watermark must not advance past it.
+          // watermark must not advance past it. expectedEmpty (a grok
+          // tool/reasoning-only session) is understood, not drifted.
           result.cleanScan = false;
         }
         if (diag.skippedLines > 0) {
@@ -400,6 +410,14 @@ export async function runTranscriptsIngest(
           // file read mid-write, corruption) — freeze the watermark so a
           // later repair with an older timestamp is still picked up.
           // Re-scans stay cheap via content-hash skip.
+          result.cleanScan = false;
+        }
+        if (diag.truncated) {
+          // A bounded read (codex head+tail over an over-budget rollout)
+          // skipped a window of the file — advancing the since-watermark
+          // over that unscanned window would drop its sessions permanently.
+          fileOutcome.truncated = true;
+          result.truncatedFiles++;
           result.cleanScan = false;
         }
       }

@@ -158,6 +158,12 @@ export const SECTIONS: DocSection[] = [
         path: "docs/guides/push-context.md",
       },
       {
+        title: "docs/guides/github-source.md",
+        description:
+          "Mirror GitHub issues, PRs, comments, reviews and CI checks as brain pages. One key + one registration command to a searchable mirror; webhook-driven instant refresh, poll-sweep fallback, daily reconcile, App-credential option.",
+        path: "docs/guides/github-source.md",
+      },
+      {
         title: "docs/mcp/DEPLOY.md",
         description: "MCP server deployment.",
         path: "docs/mcp/DEPLOY.md",
@@ -294,6 +300,13 @@ export const SECTIONS: DocSection[] = [
         title: "docs/architecture/infra-layer.md",
         description: "Shared infra patterns.",
         path: "docs/architecture/infra-layer.md",
+        includeInFull: false,
+      },
+      {
+        title: "docs/memorable-agents.md",
+        description:
+          "Optional Memorable procedural-memory integration: the session-end receipt, the config gate and kill switch, the consent model, and exactly what leaves the machine.",
+        path: "docs/memorable-agents.md",
         includeInFull: false,
       },
     ],

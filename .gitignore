@@ -49,6 +49,7 @@ test/fixtures/pglite-snapshot.version
 
 # Private brain reports — never check these in (per CLAUDE.md privacy rule)
 reports/network-intelligence/
+graphify-out/
 
 # Auto-managed by gbrain (db_only directories)
 media/x/

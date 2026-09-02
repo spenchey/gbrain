@@ -7,8 +7,56 @@
  * '../operations.ts' here (cycle).
  */
 
-import type { Operation } from './contract.ts';
-import { enforceClientSlugFence, linkReadScopeOpts, sourceScopeOpts } from './context.ts';
+import { OperationError, type Operation } from './contract.ts';
+import {
+  enforceClientSlugFence,
+  linkReadScopeOpts,
+  reclassifyMutationTimePageMiss,
+  requireWritablePage,
+  sourceScopeOpts,
+} from './context.ts';
+import { PageMissingError } from '../engine-errors.ts';
+import { TRAVERSE_PATH_ROW_CAP } from '../engine-constants.ts';
+// #4224: flag-gated cross-source identity union for the link read ops.
+import { unionLinksAcrossIdentity } from '../entity-identity.ts';
+import { findPrivateOnlySlugs, resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import type { BrainEngine } from '../engine.ts';
+import type { Link } from '../types.ts';
+// #4655: write-time pack vocabulary enforcement for explicit link verbs.
+import {
+  loadActivePackForWriteVocabulary,
+  packDeclaresLinkType,
+  undeclaredLinkTypeMessage,
+  undeclaredLinkTypeSuggestion,
+} from '../schema-pack/write-vocabulary.ts';
+
+/**
+ * #4352 remediation shared by get_links / get_backlinks: when the caller is
+ * untrusted, a `visibility: private` queried page reads exactly like a
+ * missing one ([]), and edges touching a private endpoint (from / to /
+ * frontmatter origin) are dropped so the link surface can't enumerate
+ * private slugs. One probe covers the queried slug + every endpoint; the
+ * probe considers deleted rows too (fail-closed). Trusted local + the
+ * operator opt-outs short-circuit before any query.
+ */
+async function dropPrivateLinkEndpoints(
+  engine: BrainEngine,
+  remote: boolean | undefined,
+  slug: string,
+  links: Link[],
+  scope: { sourceId?: string; sourceIds?: string[] },
+): Promise<Link[]> {
+  if (!(await resolveExcludePrivatePages(engine, remote))) return links;
+  const endpointSlugs = [...new Set([
+    slug,
+    ...links.flatMap(l => [l.from_slug, l.to_slug, ...(l.origin_slug ? [l.origin_slug] : [])]),
+  ])];
+  const hidden = await findPrivateOnlySlugs(engine, endpointSlugs, scope, { includeDeleted: true });
+  if (hidden.has(slug)) return [];
+  return links.filter(
+    l => !hidden.has(l.from_slug) && !hidden.has(l.to_slug) && !(l.origin_slug && hidden.has(l.origin_slug)),
+  );
+}
 
 // --- Links ---
 
@@ -30,7 +78,7 @@ const add_link: Operation = {
   params: {
     from: { type: 'string', required: true, description: "Slug of the page the link originates from (the edge renders on this page), e.g. 'people/alice-example'. These are page slugs — there is no `source`/`target` pair." },
     to: { type: 'string', required: true, description: "Slug of the page the link points to, e.g. 'companies/acme-example'." },
-    link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at)' },
+    link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at). When the active schema pack declares a link vocabulary, an explicit link_type must be one of its declared verbs (undeclared verbs are rejected, also under dry_run). Omitted = untyped edge.' },
     context: { type: 'string', description: 'Context for the link' },
     link_source: { type: 'string', description: "Provenance tag (kebab-case, e.g. 'citation-graph'). Defaults to 'manual'. Reconciliation-managed built-ins (markdown/frontmatter/mentions/wikilink-resolved) are rejected." },
   },
@@ -41,6 +89,21 @@ const add_link: Operation = {
     // (and renders on) the from page; linking TO a page outside the
     // binding is a reference, not a mutation of the target.
     enforceClientSlugFence(ctx, p.from as string, 'add_link');
+    // #4655: an EXPLICIT link verb must be declared by the active pack (when
+    // one resolves — best-effort, no pack means no vocabulary to enforce).
+    // Runs before the dry-run return so a dry run previews the rejection.
+    // Omitted/empty link_type stays unchecked (the untyped-edge default).
+    const linkType = typeof p.link_type === 'string' ? p.link_type : '';
+    if (linkType.length > 0) {
+      const activePack = await loadActivePackForWriteVocabulary(ctx);
+      if (activePack && !packDeclaresLinkType(activePack, linkType)) {
+        throw new OperationError(
+          'invalid_params',
+          undeclaredLinkTypeMessage(linkType, activePack, 'add_link'),
+          undeclaredLinkTypeSuggestion(activePack),
+        );
+      }
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'add_link', from: p.from, to: p.to };
     // v114 (#1941): default omitted provenance to 'manual' (NOT the engine's
     // 'markdown' default) so hand/tool-created CLI edges are honestly manual,
@@ -58,12 +121,24 @@ const add_link: Operation = {
     const linkOpts = ctx.sourceId
       ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId, originSourceId: ctx.sourceId }
       : undefined;
-    await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
-      p.from as string, p.to as string,
-      (p.context as string) || '', (p.link_type as string) || '',
-      linkSource, undefined, undefined,
-      linkOpts,
-    );
+    // #4109: per-endpoint source-boundary diagnostics before the mutation.
+    await requireWritablePage(ctx, p.from as string, 'add_link', 'from');
+    await requireWritablePage(ctx, p.to as string, 'add_link', 'to');
+    try {
+      await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
+        p.from as string, p.to as string,
+        (p.context as string) || '', linkType,
+        linkSource, undefined, undefined,
+        linkOpts,
+      );
+    } catch (error) {
+      // An endpoint hard-deleted between preflight and mutation: reclassify
+      // the typed engine miss instead of surfacing it as internal_error.
+      if (error instanceof PageMissingError) {
+        return reclassifyMutationTimePageMiss(ctx, error.slug, 'add_link', error.endpoint);
+      }
+      throw error;
+    }
     return { status: 'ok' };
   },
   cliHints: { name: 'link', aliases: ['link-add'], positional: ['from', 'to'] },
@@ -86,13 +161,16 @@ const remove_link: Operation = {
     const linkOpts = ctx.sourceId
       ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId }
       : undefined;
-    await ctx.engine.removeLink(
+    // #4527: report how many edges actually died — an unconditional
+    // `{ status: 'ok' }` made a zero-match delete (typo'd slug, wrong
+    // link_type, already removed) indistinguishable from a real removal.
+    const removed = await ctx.engine.removeLink(
       p.from as string, p.to as string,
       (p.link_type as string) || undefined,
       (p.link_source as string) || undefined,
       linkOpts,
     );
-    return { status: 'ok' };
+    return { status: 'ok', removed };
   },
   cliHints: { name: 'unlink', aliases: ['link-rm'], positional: ['from', 'to'] },
 };
@@ -108,7 +186,18 @@ const get_links: Operation = {
     // scalar scope (promoted to sourceIds[]) — reaches the engine's all-endpoint
     // branch. Trusted local/internal callers keep the scalar cross-source view.
     const sourceOpts = linkReadScopeOpts(ctx);
-    return ctx.engine.getLinks(p.slug as string, sourceOpts);
+    const links = await ctx.engine.getLinks(p.slug as string, sourceOpts);
+    // #4224: flag-gated identity union — merge edges from the page's identity
+    // co-members (entity_identity.union config, default off; pure no-op then).
+    // Member visibility never widens past the caller's grant. The scalar base
+    // scope (when present) pins group resolution to the page actually read.
+    const unioned = await unionLinksAcrossIdentity(ctx.engine, p.slug as string, links, 'out', {
+      sourceId: sourceOpts.sourceId,
+      allowedSources: sourceOpts.sourceIds,
+    });
+    // #4352: private filtering runs AFTER the identity union so co-member
+    // edges the union adds are subject to the same visibility gate.
+    return dropPrivateLinkEndpoints(ctx.engine, ctx.remote, p.slug as string, unioned, sourceOpts);
   },
   scope: 'read',
 };
@@ -123,7 +212,14 @@ const get_backlinks: Operation = {
     // #2200: linkReadScopeOpts — federated grant + untrusted remote scalar
     // (promoted to sourceIds[]) reach the engine's all-endpoint branch.
     const sourceOpts = linkReadScopeOpts(ctx);
-    return ctx.engine.getBacklinks(p.slug as string, sourceOpts);
+    const links = await ctx.engine.getBacklinks(p.slug as string, sourceOpts);
+    // #4224: flag-gated identity union (see get_links).
+    const unioned = await unionLinksAcrossIdentity(ctx.engine, p.slug as string, links, 'in', {
+      sourceId: sourceOpts.sourceId,
+      allowedSources: sourceOpts.sourceIds,
+    });
+    // #4352: private filtering after the union (see get_links).
+    return dropPrivateLinkEndpoints(ctx.engine, ctx.remote, p.slug as string, unioned, sourceOpts);
   },
   scope: 'read',
   cliHints: { name: 'backlinks', positional: ['slug'] },
@@ -155,35 +251,98 @@ const list_link_sources: Operation = {
  */
 const TRAVERSE_DEPTH_CAP = 10;
 
+/**
+ * Default depth for the remote no-direction call. #4666 made that call
+ * bidirectional, and traversePaths' `both` branch is an uncapped
+ * path-enumerating recursive CTE (no LIMIT) — on an entity hub with 10^2-10^3
+ * edges the legacy depth-5 default is combinatorial, on the per-agent-turn
+ * path. Two hops covers the realistic relationship query ("people who
+ * attended meetings with Alice"); a caller that wants more passes `depth`
+ * explicitly (still honored up to TRAVERSE_DEPTH_CAP).
+ */
+const REMOTE_BIDIRECTIONAL_DEFAULT_DEPTH = 2;
+const DEFAULT_TRAVERSE_DEPTH = 5;
+
 const traverse_graph: Operation = {
   name: 'traverse_graph',
-  description: 'Traverse link graph from a page. With link_type/direction, returns edges (GraphPath[]) instead of nodes.',
+  description: `Traverse link graph from a page. Remote callers default to bidirectional edges (GraphPath[]) at depth ${REMOTE_BIDIRECTIONAL_DEFAULT_DEPTH} (pass depth explicitly for deeper walks); trusted local no-filter callers keep the legacy node shape at depth ${DEFAULT_TRAVERSE_DEPTH}.`,
   params: {
     slug: { type: 'string', required: true, description: "Slug of the page to start the traversal from, e.g. 'people/alice-example'. This is the start-node param — there is no `start` or `root` param." },
-    depth: { type: 'number', description: `Max traversal depth (default 5, capped at ${TRAVERSE_DEPTH_CAP})` },
+    depth: { type: 'number', description: `Max traversal depth (capped at ${TRAVERSE_DEPTH_CAP}). Default ${DEFAULT_TRAVERSE_DEPTH}, except a remote call that lets direction default to 'both' uses ${REMOTE_BIDIRECTIONAL_DEFAULT_DEPTH} (bidirectional path enumeration is combinatorial on hubs); an explicit depth is always honored up to the cap.` },
     link_type: { type: 'string', description: 'Filter to one link type (per-edge filter, traversal only follows matching edges)' },
-    direction: { type: 'string', enum: ['in', 'out', 'both'], description: 'Traversal direction (default out)' },
+    direction: { type: 'string', enum: ['in', 'out', 'both'], description: "Traversal direction ('in', 'out', or 'both'). Remote callers default to 'both'; trusted local no-filter callers keep the legacy outgoing-node output." },
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    const requestedDepth = (p.depth as number) || 5;
+    const linkType = p.link_type as string | undefined;
+    // #4666: remote callers (ctx.remote !== false — fail-closed) default to
+    // direction=both, so a node with only INBOUND typed edges stops reading
+    // as nodes=1/links=0 (indistinguishable from edge absence). An explicit
+    // direction param still wins for callers that want outbound-only.
+    const requestedDirection = p.direction as 'in' | 'out' | 'both' | undefined;
+    const directionDefaultedToBoth = requestedDirection === undefined && ctx.remote !== false;
+    const direction = requestedDirection ?? (directionDefaultedToBoth ? 'both' : undefined);
+    // Depth default follows the direction default: a remote call that did not
+    // ask for a direction (so walks `both`) AND did not ask for a depth gets
+    // the conservative bidirectional default; everything else keeps 5.
+    const depthRequested = typeof p.depth === 'number' && p.depth > 0;
+    const requestedDepth = depthRequested
+      ? (p.depth as number)
+      : directionDefaultedToBoth ? REMOTE_BIDIRECTIONAL_DEFAULT_DEPTH : DEFAULT_TRAVERSE_DEPTH;
     if (requestedDepth > TRAVERSE_DEPTH_CAP) {
       ctx.logger.warn(`[gbrain] traverse_graph depth clamped from ${requestedDepth} to ${TRAVERSE_DEPTH_CAP}`);
     }
     const depth = Math.max(1, Math.min(requestedDepth, TRAVERSE_DEPTH_CAP));
-    const linkType = p.link_type as string | undefined;
-    const direction = p.direction as 'in' | 'out' | 'both' | undefined;
     // v0.34.1 (#861 — P0 leak seal): thread caller's source scope so graph
     // walks stay within the auth'd client's accessible sources. Pre-fix,
     // traverseGraph / traversePaths happily followed edges into pages from
     // foreign sources, leaking topology + page metadata via the graph op.
     const scope = sourceScopeOpts(ctx);
-    // Backward compat: when neither link_type nor direction is provided, return
-    // the legacy GraphNode[] shape. Once either is set, switch to GraphPath[].
-    if (linkType === undefined && direction === undefined) {
-      return ctx.engine.traverseGraph(slug, depth, scope);
+    // #4352 remediation: graph output must not enumerate private slugs to an
+    // untrusted caller. A private START page reads exactly like a missing one
+    // ([]); private nodes/edges elsewhere in the walk are stripped post-hoc
+    // (op-level gate, same as get_page — the engine CTE stays shared).
+    const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
+    if (excludePrivate) {
+      const startHidden = await findPrivateOnlySlugs(ctx.engine, [slug], scope, { includeDeleted: true });
+      if (startHidden.has(slug)) return [];
     }
-    return ctx.engine.traversePaths(slug, { depth, linkType, direction, ...scope });
+    // Backward compat: trusted local no-filter callers keep the legacy
+    // GraphNode[] shape used by `gbrain graph`. Remote MCP callers need the
+    // natural no-filter invocation to surface inbound-only typed edges too,
+    // so they default to direction=both and get explicit GraphPath[] edges.
+    if (linkType === undefined && requestedDirection === undefined && ctx.remote === false) {
+      const nodes = await ctx.engine.traverseGraph(slug, depth, scope);
+      if (!excludePrivate) return nodes;
+      const hidden = await findPrivateOnlySlugs(
+        ctx.engine,
+        [...new Set(nodes.flatMap(n => [n.slug, ...n.links.map(l => l.to_slug)]))],
+        scope,
+        { includeDeleted: true },
+      );
+      return nodes
+        .filter(n => !hidden.has(n.slug))
+        .map(n => (n.links.some(l => hidden.has(l.to_slug))
+          ? { ...n, links: n.links.filter(l => !hidden.has(l.to_slug)) }
+          : n));
+    }
+    const { paths, truncated } = await ctx.engine.traversePathsDetailed(slug, { depth, linkType, direction, ...scope });
+    // Row cap hit: the walk's deepest edges were dropped. stderr-only so the
+    // GraphPath[] wire shape stays unchanged (additive contract).
+    if (truncated) {
+      ctx.logger.warn(
+        `[gbrain] traverse_graph output truncated at ${TRAVERSE_PATH_ROW_CAP} edge rows (shallowest first). ` +
+        `Lower depth or narrow with link_type/direction for a complete walk.`,
+      );
+    }
+    if (!excludePrivate) return paths;
+    const hidden = await findPrivateOnlySlugs(
+      ctx.engine,
+      [...new Set(paths.flatMap(e => [e.from_slug, e.to_slug]))],
+      scope,
+      { includeDeleted: true },
+    );
+    return paths.filter(e => !hidden.has(e.from_slug) && !hidden.has(e.to_slug));
   },
   scope: 'read',
   cliHints: { name: 'graph', positional: ['slug'] },

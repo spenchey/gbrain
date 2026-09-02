@@ -26,7 +26,6 @@ afterAll(async () => {
 
 async function clearRollup() {
   await engine.executeRaw('DELETE FROM extract_rollup_7d', []);
-  await engine.executeRaw(`DELETE FROM pages WHERE type = 'extract_receipt'`, []);
 }
 
 describe('computeExtractHealthCheck — empty + happy paths', () => {
@@ -55,31 +54,6 @@ describe('computeExtractHealthCheck — empty + happy paths', () => {
     expect((check.details as any)?.kinds[0].cost_7d_usd).toBeCloseTo(1.23, 4);
     expect((check.details as any)?.kinds[0].halt_rate).toBe(0);
   });
-
-  test('latest successful receipt resolves a historical high halt rate', async () => {
-    await clearRollup();
-    await engine.executeRaw(
-      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
-       VALUES ('atoms', 'agent', CURRENT_DATE, 0.20, 0, 0, 4, 1, 0, NOW())`,
-      [],
-    );
-    await engine.putPage('extracts/recovery/atoms', {
-      type: 'extract_receipt',
-      title: 'atoms recovery',
-      compiled_truth: 'Successful atoms extraction.',
-      frontmatter: {
-        kind: 'atoms',
-        extracted_at: new Date().toISOString(),
-        total_rows: 3,
-      },
-    });
-
-    const check = await computeExtractHealthCheck(engine);
-    expect(check.status).toBe('ok');
-    expect(check.message).toContain('recovered');
-    expect((check.details as any)?.kinds[0].halt_rate).toBe(0.8);
-    expect((check.details as any)?.kinds[0].recovered).toBe(true);
-  });
 });
 
 describe('computeExtractHealthCheck — WARN paths', () => {
@@ -97,6 +71,35 @@ describe('computeExtractHealthCheck — WARN paths', () => {
     expect(check.message).toContain('facts.conversation');
     expect(check.message).toContain('50');
     expect((check.details as any)?.kinds[0].halt_rate).toBe(0.5);
+  });
+
+  test('a stale high-halt-rate kind (no activity in 6 days) shows its age in the message', async () => {
+    await clearRollup();
+    // day/updated_at 6 days ago, still inside the 7-day rolling window (day
+    // >= CURRENT_DATE - 7) — the historical halts still sum into the
+    // reported rate even though nothing has run since.
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'chatgpt', CURRENT_DATE - 6, 5.00, 0, 0, 90, 5, 0, NOW() - INTERVAL '6 days')`,
+      [],
+    );
+    const check = await computeExtractHealthCheck(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('atoms');
+    expect(check.message).toContain('6d ago');
+  });
+
+  test("today's activity shows 'today', not '0d ago'", async () => {
+    await clearRollup();
+    await engine.executeRaw(
+      `INSERT INTO extract_rollup_7d (kind, source_id, day, cost_usd, eval_pass_count, eval_fail_count, halt_count, round_completed_count, rollup_write_failures, updated_at)
+       VALUES ('atoms', 'default', CURRENT_DATE, 5.00, 0, 0, 90, 5, 0, NOW())`,
+      [],
+    );
+    const check = await computeExtractHealthCheck(engine);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('today');
+    expect(check.message).not.toContain('0d ago');
   });
 
   test('older successful receipt does not hide a newer halt', async () => {

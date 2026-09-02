@@ -69,7 +69,7 @@ function formatModesText(report: SearchModesReport): string {
     const b = report.bundles[mode];
     const active = mode === report.active_mode ? '  ← active' : '';
     lines.push(`  ${mode.padEnd(13)}${active}`);
-    lines.push(`    cache=${b.cache_enabled} intentWeighting=${b.intentWeighting}`);
+    lines.push(`    cache=${b.cache_enabled} intentWeighting=${b.intentWeighting} keywordOrFallback=${b.keywordOrFallback}`);
     lines.push(`    tokenBudget=${b.tokenBudget ?? 'none'} searchLimit=${b.searchLimit} expansion=${b.expansion}`);
   }
   lines.push('');
@@ -77,6 +77,9 @@ function formatModesText(report: SearchModesReport): string {
   for (const [k, desc] of Object.entries(KNOB_DESCRIPTIONS)) {
     lines.push(`  ${k.padEnd(28)} ${desc}`);
   }
+  // #4604: the dashboard shows brain-level resolution only.
+  lines.push('');
+  lines.push(`Note: ${report.per_call_note}`);
   return lines.join('\n');
 }
 
