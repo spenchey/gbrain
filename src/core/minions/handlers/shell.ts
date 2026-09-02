@@ -31,6 +31,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { MinionJobContext } from '../types.ts';
 import { UnrecoverableError } from '../types.ts';
 import { deriveEnvKey, resolveInheritValue } from './shell-inherit.ts';
+import { applyDeferredEnv } from './shell-env-defer.ts';
 import { validateShellJobParams } from './shell-validate.ts';
 import { redactSecretsInText } from './shell-redact.ts';
 import { loadConfig } from '../../config.ts';
@@ -77,6 +78,14 @@ export interface ShellJobParams {
    *  use `inherit:` instead. Enforced pre-enqueue by `validateShellJobParams`. */
   env?: Record<string, string>;
   /**
+   * Key NAMES of env entries stripped at enqueue time because they looked
+   * credential-shaped (secrets-at-rest fix; see `shell-env-defer.ts`). The
+   * handler resolves each name from the WORKER's local process env when the
+   * child env is built — values never persist in the job row. A name absent
+   * from the worker env is logged loudly (name only) and skipped.
+   */
+  env_deferred_keys?: string[];
+  /**
    * Free-form list of config-key names to inherit from the worker's
    * `loadConfig()` into the child env (v0.36.5.0). Each name must match
    * `[a-z][a-z0-9_]*`; the env key is derived via `deriveEnvKey` (e.g.
@@ -114,8 +123,14 @@ export interface ShellJobResult {
  *      `deriveEnvKey` (e.g. `database_url` → `GBRAIN_DATABASE_URL`).
  *      Pre-enqueue validation fail-fasted on missing names, so we reach this
  *      branch only when every name resolves.
- *   3. Caller-supplied `job.data.env` overlay (free-form; trust model is
- *      same-uid agent + worker, so the agent decides what to pass).
+ *   3. `env_deferred_keys` resolved from the WORKER's local process env
+ *      (secrets-at-rest fix — the values were stripped at enqueue and never
+ *      persisted; see `shell-env-defer.ts`). Missing names are reported via
+ *      `warnMissingDeferred` (name only) and skipped.
+ *   4. Caller-supplied `job.data.env` overlay (free-form; trust model is
+ *      same-uid agent + worker, so the agent decides what to pass). Stored
+ *      env merges OVER the deferred/local baseline, so legacy rows with
+ *      plaintext values behave exactly as before.
  *
  *  Trust boundary is the operator's choice of `cwd`. Resolution uses
  *  `Object.hasOwn` (see `resolveInheritValue`) so prototype-pollution lookups
@@ -124,6 +139,8 @@ export interface ShellJobResult {
 function buildChildEnv(
   override: Record<string, string> | undefined,
   inherit: string[] | undefined,
+  deferredKeys?: string[],
+  warnMissingDeferred: (key: string) => void = () => {},
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const key of SHELL_ENV_ALLOWLIST) {
@@ -144,6 +161,7 @@ function buildChildEnv(
       // this code path runs in practice.
     }
   }
+  applyDeferredEnv(env, deferredKeys, process.env, warnMissingDeferred);
   if (override) {
     for (const [k, v] of Object.entries(override)) env[k] = v;
   }
@@ -237,7 +255,14 @@ export async function shellHandler(ctx: MinionJobContext): Promise<ShellJobResul
   //   (c) drift between INHERITABLE and the worker's actual config (the
   //       fail-fast guard fires here on a worker that lost its DB URL after submit).
   const params = validateShellJobParams(ctx.data);
-  const env = buildChildEnv(params.env, params.inherit);
+  const env = buildChildEnv(params.env, params.inherit, params.env_deferred_keys, (key) => {
+    // LOUD, name-only: the value was deliberately never persisted. If the
+    // child later fails for want of this variable, this line is the receipt.
+    console.warn(
+      `[shell] Job #${ctx.id}: deferred env key "${key}" is not set in the worker's local environment; ` +
+      'child runs without it (set it in the worker launchd/profile env to restore it)',
+    );
+  });
 
   // Build the redaction map: inherit-name → resolved value. The handler
   // pays one extra loadConfig() to assemble this in one pass, separate from

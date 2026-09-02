@@ -159,6 +159,19 @@ const submit_job: Operation = {
     if (name === 'shell' && trusted) {
       const { validateShellJobParams } = await import('../minions/handlers/shell-validate.ts');
       validateShellJobParams(jobData);
+      // Secrets-at-rest fix (parity with the CLI submit path): strip
+      // credential-shaped env entries before queue.add persists the row;
+      // store only the stripped key NAMES in `env_deferred_keys`. The worker
+      // resolves each from its own local env at execution.
+      const { splitDeferredEnv } = await import('../minions/handlers/shell-env-defer.ts');
+      const split = splitDeferredEnv(jobData.env as Record<string, string> | undefined);
+      if (split.deferredKeys.length > 0) {
+        const prior = Array.isArray(jobData.env_deferred_keys)
+          ? (jobData.env_deferred_keys as unknown[]).filter((k): k is string => typeof k === 'string')
+          : [];
+        jobData.env = split.env;
+        jobData.env_deferred_keys = [...new Set([...prior, ...split.deferredKeys])].sort();
+      }
     }
 
     const job = await (async () => {

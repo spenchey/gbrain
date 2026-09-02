@@ -41,6 +41,10 @@ export interface ValidatedShellJobParams {
   argv?: string[];
   cwd: string;
   env?: Record<string, string>;
+  /** Key NAMES stripped from `env` at enqueue time (secrets-at-rest fix).
+   *  The worker resolves each from its own local process env at execution.
+   *  See `shell-env-defer.ts`. */
+  env_deferred_keys?: string[];
   inherit?: string[];
   redact_secrets?: boolean;
 }
@@ -112,6 +116,31 @@ export function validateShellJobParams(
     }
   }
 
+  // ---- `env_deferred_keys` shape validation ----
+  // Key NAMES only (never values). Written by the submit surfaces via
+  // `splitDeferredEnv`; also accepted verbatim from callers that pre-split
+  // (e.g. the dispatch daemons). Names must be non-empty env-var-shaped
+  // strings so the worker-side `process.env` lookup and the missing-key
+  // warning stay unambiguous.
+  let envDeferredKeys: string[] | undefined;
+  if (data.env_deferred_keys !== undefined) {
+    if (!Array.isArray(data.env_deferred_keys)) {
+      throw new UnrecoverableError(
+        'shell: env_deferred_keys must be an array of env-var names (see: docs/guides/minions-shell-jobs.md#secrets)',
+      );
+    }
+    const keys = data.env_deferred_keys as unknown[];
+    for (const key of keys) {
+      if (typeof key !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        throw new UnrecoverableError(
+          'shell: env_deferred_keys entries must be env-var-shaped names ' +
+          '(see: docs/guides/minions-shell-jobs.md#secrets)',
+        );
+      }
+    }
+    envDeferredKeys = keys as string[];
+  }
+
   // ---- `inherit` shape validation ----
   // Free-form list of config-key names. The closed enum of v0.35-RC was
   // overcautious for the single-uid trust model — the agent knows what it
@@ -175,6 +204,7 @@ export function validateShellJobParams(
     argv: hasArgv ? (data.argv as string[]) : undefined,
     cwd: data.cwd as string,
     env: data.env as Record<string, string> | undefined,
+    env_deferred_keys: envDeferredKeys,
     inherit,
     redact_secrets: data.redact_secrets as boolean | undefined,
   };
