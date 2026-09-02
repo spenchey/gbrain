@@ -143,7 +143,7 @@ export async function invalidateStaleSignatureEmbeddingsGuarded(
   const sigClause = opts.includeNullSignature
     ? `(p.embedding_signature IS NULL OR p.embedding_signature <> $1)`
     : `p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1`;
-  const batchSize = Math.max(1, opts.batchSize ?? 500);
+  const batchSize = Math.max(1, opts.batchSize ?? 2000);
   let invalidated = 0;
   while (true) {
     const rows = await engine.executeRaw<{ page_id: number }>(
