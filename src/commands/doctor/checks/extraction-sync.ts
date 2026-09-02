@@ -230,6 +230,10 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
           AND COALESCE(frontmatter ->> 'content_hash_duplicate_exempt', 'false') <> 'true'
         GROUP BY source_id, content_hash
        HAVING count(*) > 1
+          AND NOT (
+            count(frontmatter ->> 'id') = count(*)
+            AND count(DISTINCT frontmatter ->> 'id') = count(*)
+          )
         LIMIT 50`,
     );
     if (rows.length === 0) {
