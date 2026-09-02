@@ -231,8 +231,8 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
         GROUP BY source_id, content_hash
        HAVING count(*) > 1
           AND NOT (
-            count(frontmatter ->> 'id') = count(*)
-            AND count(DISTINCT frontmatter ->> 'id') = count(*)
+            bool_and(slug ~ '^(skills/|plugin/skills/|plugin-variants/[^/]+/skills/)')
+            AND count(DISTINCT regexp_replace(slug, '^(plugin/|plugin-variants/[^/]+/)', '')) = 1
           )
         LIMIT 50`,
     );

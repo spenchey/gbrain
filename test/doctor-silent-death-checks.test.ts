@@ -127,16 +127,19 @@ describe('content_hash_duplicates (#2250)', () => {
     expect(c.status).toBe('ok');
   });
 
-  test('packaged mirrors with distinct frontmatter ids are intentional', async () => {
+  test('packaged mirrors with the same relative skill path are intentional', async () => {
     await addPage('skills/example/skill', { hash: 'same' });
     await addPage('plugin/skills/example/skill', { hash: 'same' });
-    await engine.executeRaw(
-      `UPDATE pages
-          SET frontmatter = jsonb_build_object('id', slug)
-        WHERE content_hash = 'same'`,
-    );
+    await addPage('plugin-variants/gbrain-daily/skills/example/skill', { hash: 'same' });
     const c = await checkContentHashDuplicates(engine);
     expect(c.status).toBe('ok');
+  });
+
+  test('same content in unrelated skill paths still warns', async () => {
+    await addPage('skills/example/skill', { hash: 'same' });
+    await addPage('skills/other/skill', { hash: 'same' });
+    const c = await checkContentHashDuplicates(engine);
+    expect(c.status).toBe('warn');
   });
 
   test('#3946: two distinct bare slugs with same hash → warn without delete hint', async () => {
