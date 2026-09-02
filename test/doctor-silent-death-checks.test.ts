@@ -116,6 +116,17 @@ describe('content_hash_duplicates (#2250)', () => {
     expect((c.details as any).distinct_slug_group_count).toBe(1);
   });
 
+  test('explicitly reviewed duplicate pages are exempt', async () => {
+    await addPage('archive/notes/example', { hash: 'same' });
+    await addPage('imports/notes/example', { hash: 'same' });
+    await engine.executeRaw(
+      `UPDATE pages
+          SET frontmatter = frontmatter || '{"content_hash_duplicate_exempt":true}'::jsonb`,
+    );
+    const c = await checkContentHashDuplicates(engine);
+    expect(c.status).toBe('ok');
+  });
+
   test('#3946: two distinct bare slugs with same hash → warn without delete hint', async () => {
     await addPage('alice-example', { hash: 'same' });
     await addPage('alice-copy', { hash: 'same' });

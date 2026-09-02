@@ -227,6 +227,7 @@ export async function checkContentHashDuplicates(engine: BrainEngine): Promise<C
               string_agg(slug, '|' ORDER BY length(slug), slug) AS slugs
          FROM pages
         WHERE deleted_at IS NULL AND content_hash IS NOT NULL AND content_hash <> ''
+          AND COALESCE(frontmatter ->> 'content_hash_duplicate_exempt', 'false') <> 'true'
         GROUP BY source_id, content_hash
        HAVING count(*) > 1
         LIMIT 50`,

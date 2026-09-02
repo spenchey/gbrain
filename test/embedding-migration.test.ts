@@ -549,6 +549,18 @@ describe('#4305 false target stamps + #4306 embed_skip-safe invalidation', () =>
     expect(await chunkState('skip-drift')).toEqual({ embedded: 1, nulls: 0 });
   });
 
+  test('#4306: guarded invalidation drains in bounded batches', async () => {
+    await seedModeled('batch-a', 'a', { model: 'voyage:voyage-3-large', signature: 'old:model:1' });
+    await seedModeled('batch-b', 'b', { model: 'voyage:voyage-3-large', signature: 'old:model:1' });
+    await seedModeled('batch-c', 'c', { model: 'voyage:voyage-3-large', signature: 'old:model:1' });
+    const n = await invalidateStaleSignatureEmbeddingsGuarded(engine, {
+      signature: 'new:model:1',
+      batchSize: 1,
+    });
+    expect(n).toBe(3);
+    expect(await engine.countStaleChunks()).toBe(3);
+  });
+
   test('#4306: verify reports embed_skip NULL chunks without blocking completion', async () => {
     // The already-damaged shape: an embed_skip page whose chunks were NULLed
     // by a pre-fix run. Nothing re-embeds it by design — completion must not

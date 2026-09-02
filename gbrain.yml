@@ -13,10 +13,13 @@ storage:
   # content. .gitignored automatically by `gbrain sync`. Restorable from the DB
   # via `gbrain export --restore-only`.
   db_only:
+    # Legacy root concept page (slug "concepts"); distinct from tracked concepts/.
+    - concepts
     - media/
     - media/x/
     - media/articles/
     - meetings/transcripts/
+    - conversations/
     # Machine-derived knowledge and historical import batches. These are
     # intentionally database-canonical and restorable with gbrain export.
     - topics/
@@ -46,3 +49,4 @@ storage:
     - 20260717/
     - 20260719/
     - 20260721/
+    - 20260830/

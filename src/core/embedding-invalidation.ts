@@ -128,7 +128,7 @@ export async function clearFalseStampedSignatures(
 
 export async function invalidateStaleSignatureEmbeddingsGuarded(
   engine: Pick<BrainEngine, 'executeRaw'>,
-  opts: { signature: string; sourceId?: string; includeNullSignature?: boolean },
+  opts: { signature: string; sourceId?: string; includeNullSignature?: boolean; batchSize?: number },
 ): Promise<number> {
   const colId = await activeColId(engine);
   const params: unknown[] = [opts.signature];
@@ -143,16 +143,27 @@ export async function invalidateStaleSignatureEmbeddingsGuarded(
   const sigClause = opts.includeNullSignature
     ? `(p.embedding_signature IS NULL OR p.embedding_signature <> $1)`
     : `p.embedding_signature IS NOT NULL AND p.embedding_signature <> $1`;
-  const rows = await engine.executeRaw<{ page_id: number }>(
-    `UPDATE content_chunks cc
-        SET ${colId} = NULL, embedded_at = NULL
-       FROM pages p
-      WHERE cc.page_id = p.id
-        AND cc.${colId} IS NOT NULL
-        AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
-        AND ${sigClause}${srcClause}
-      RETURNING cc.page_id`,
-    params,
-  );
-  return (rows as unknown[]).length;
+  const batchSize = Math.max(1, opts.batchSize ?? 500);
+  let invalidated = 0;
+  while (true) {
+    const rows = await engine.executeRaw<{ page_id: number }>(
+      `WITH candidates AS (
+         SELECT cc.id
+           FROM content_chunks cc
+           JOIN pages p ON p.id = cc.page_id
+          WHERE cc.${colId} IS NOT NULL
+            AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
+            AND ${sigClause}${srcClause}
+          LIMIT ${batchSize}
+       )
+       UPDATE content_chunks cc
+          SET ${colId} = NULL, embedded_at = NULL
+         FROM candidates c
+        WHERE cc.id = c.id
+       RETURNING cc.page_id`,
+      params,
+    );
+    invalidated += rows.length;
+    if (rows.length < batchSize) return invalidated;
+  }
 }
