@@ -132,6 +132,12 @@ describe('validatePageSlug', () => {
     expect(() => validatePageSlug('people/my_file_name')).not.toThrow();
   });
 
+  it('accepts uppercase letters in external identifier slugs', () => {
+    expect(() => validatePageSlug(
+      'media/calendar/work/45pfljjvit7v7dboqh8if61jsu_20260904T143000Z',
+    )).not.toThrow();
+  });
+
   it('accepts underscore-LED segments the slugifier produces (Hugo _index shape, #4665)', () => {
     // slugifySegment('_index') === '_index' — leading underscores survive
     // sync, so the op boundary must round-trip them too. Dots stay

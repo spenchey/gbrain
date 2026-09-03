@@ -93,7 +93,12 @@ export function validateUploadPath(filePath: string, root: string, strict = true
 // underscores (`_index.md` → `_index`, the Hugo convention), so rejecting
 // them recreates the un-updatable-synced-page class this widen closes.
 // Dot stays continuation-only — `..` traversal remains impossible.
-const OP_PAGE_SLUG_SEG = `[${SLUG_WORD_CHARS}_][${SLUG_WORD_CHARS}._\\-]*`;
+// Unicode property escapes do not reliably case-fold `\p{Ll}` under the `i`
+// flag in every JS runtime. Include uppercase/titlecase letters explicitly so
+// external IDs such as Google Calendar's recurring suffix (`...T143000Z`)
+// satisfy the documented "letters/numbers in any script" contract.
+const OP_SLUG_WORD_CHARS = `${SLUG_WORD_CHARS}\\p{Lu}\\p{Lt}`;
+const OP_PAGE_SLUG_SEG = `[${OP_SLUG_WORD_CHARS}_][${OP_SLUG_WORD_CHARS}._\\-]*`;
 
 /**
  * Allowlist validator for page slugs. Rejects URL-encoded traversal, backslashes,
