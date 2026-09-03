@@ -24,6 +24,7 @@
  */
 
 import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
+import { isNullLikeEntity } from './entity-ref.ts';
 
 const DEDUP_THRESHOLD = 0.95;
 const DEDUP_CANDIDATE_LIMIT = 5;
@@ -37,16 +38,7 @@ const DEDUP_CANDIDATE_LIMIT = 5;
  * guard rightly refuses to create the page, so no page renders them and
  * no entity lookup can reach them).
  */
-const NULL_LIKE_ENTITY_TOKENS: ReadonlySet<string> = new Set([
-  'null', 'undefined', 'none', 'n/a', 'nil', '-',
-]);
-
-/** True when an entity ref is absent or a null-like placeholder token. */
-export function isNullLikeEntity(entity: string | null | undefined): boolean {
-  if (entity == null) return true;
-  const t = entity.trim().toLowerCase();
-  return t === '' || NULL_LIKE_ENTITY_TOKENS.has(t);
-}
+export { isNullLikeEntity } from './entity-ref.ts';
 
 export interface SingleFactInput {
   fact: string;
