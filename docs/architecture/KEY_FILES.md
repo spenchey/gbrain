@@ -1,3 +1,7 @@
+---
+embed_skip: true
+---
+
 # Key files — per-file index (gbrain repo)
 
 On-demand reference. CLAUDE.md (the always-loaded orientation file) routes here

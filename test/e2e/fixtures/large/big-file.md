@@ -1,6 +1,7 @@
 ---
 type: concept
 title: Large Test File
+embed_skip: true
 ---
 
 This is a large test file to verify the 5MB import limit works.

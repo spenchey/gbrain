@@ -1,7 +1,6 @@
 storage:
   # Directories that are version-controlled — human-curated, edited by hand.
   db_tracked:
-    - people/
     - companies/
     - deals/
     - concepts/
@@ -13,6 +12,25 @@ storage:
   # content. .gitignored automatically by `gbrain sync`. Restorable from the DB
   # via `gbrain export --restore-only`.
   db_only:
+    # Motor Inn operational records are private, database-canonical data.
+    # They must never be exported into this public software repository.
+    - people/
+    - workflow-lessons/
+    - marketing-team-creation/
+    - knowledge/
+    - motorinn/
+    - design/
+    - tickets/
+    - decisions/
+    - lighthouse/
+    - cards/
+    - operations/
+    - ops/
+    - manager-sweep/
+    - mot-1527/
+    - mot-1528/
+    - system/
+    - slugs/
     - media/
     - media/x/
     - media/articles/
@@ -27,6 +45,7 @@ storage:
     - meta-catalog-sync/
     - meta-just-sold/
     - meta-new-arrivals/
+    - meta-reels/
     - 20260522/
     - 20260523/
     - 20260524/

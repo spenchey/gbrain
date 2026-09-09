@@ -1,3 +1,7 @@
+---
+embed_skip: true
+---
+
 # Changelog
 
 All notable changes to GBrain will be documented in this file.

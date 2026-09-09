@@ -1,3 +1,7 @@
+---
+embed_skip: true
+---
+
 # TODOS
 
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
