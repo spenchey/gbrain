@@ -128,7 +128,10 @@ export async function checkEmbedStaleness(
 ): Promise<OnboardCheckResult> {
   const staleCount = await safeCount(
     engine,
-    `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
+    `SELECT COUNT(*) AS count FROM content_chunks c
+       JOIN pages p ON p.id = c.page_id
+      WHERE c.embedding IS NULL AND p.deleted_at IS NULL
+        AND COALESCE(p.frontmatter->>'embed_skip', 'false') <> 'true'`,
   );
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';

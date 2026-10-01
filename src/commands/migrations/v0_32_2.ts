@@ -262,7 +262,7 @@ async function phaseBFenceFacts(
             /* fallback */           'concept';
           const tail = entitySlug.split('/').slice(1).join('/');
           const title = tail.replace(/[-_/]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) || entitySlug;
-          body = `---\ntype: ${type}\ntitle: ${title}\nslug: ${entitySlug}\n---\n\n# ${title}\n`;
+          body = `---\ntype: ${type}\ntitle: ${JSON.stringify(title)}\nslug: ${JSON.stringify(entitySlug)}\n---\n\n# ${title}\n`;
         }
 
         // Append each legacy row, collecting the assigned row_nums.
@@ -273,21 +273,24 @@ async function phaseBFenceFacts(
         // existing row and append a duplicate. We dedup on (claim,
         // source) before append to handle this.
         const existingFence = parseFactsFence(body);
-        const existingKeySet = new Set(existingFence.facts.map(f => `${f.claim}\0${f.source ?? ''}`));
+        const claimedRows = await engine.executeRaw<{ row_num: number }>(
+          `SELECT row_num FROM facts WHERE source_id = $1 AND source_markdown_slug = $2 AND row_num IS NOT NULL`,
+          [sourceId, entitySlug],
+        );
+        const usedRows = new Set(claimedRows.map(r => Number(r.row_num)));
 
         const assignments: Array<{ id: string; row_num: number }> = [];
         for (const row of group) {
-          const key = `${row.fact}\0${row.source ?? ''}`;
-          if (existingKeySet.has(key)) {
-            // Already fenced (idempotent re-run). Find the existing
-            // row_num and assign it to this DB row.
-            const existing = existingFence.facts.find(f =>
-              f.claim === row.fact && (f.source ?? '') === (row.source ?? ''),
-            );
-            if (existing) {
-              assignments.push({ id: row.id, row_num: existing.rowNum });
-              continue;
-            }
+          // Recover only an unclaimed row after a partial write. Identical
+          // legacy records remain distinct; the unique fence key is never reused.
+          const existing = existingFence.facts.find(f =>
+            f.claim === row.fact && (f.source ?? '') === (row.source ?? '') &&
+            !usedRows.has(f.rowNum),
+          );
+          if (existing) {
+            assignments.push({ id: row.id, row_num: existing.rowNum });
+            usedRows.add(existing.rowNum);
+            continue;
           }
           // Append a new row.
           const validFromStr = (row.valid_from instanceof Date ? row.valid_from : new Date(row.valid_from))
@@ -297,6 +300,7 @@ async function phaseBFenceFacts(
                 .toISOString().slice(0, 10)
             : undefined;
           const { body: updated, rowNum } = upsertFactRow(body, {
+            rowNum:     Math.max(0, ...parseFactsFence(body).facts.map(f => f.rowNum), ...usedRows) + 1,
             claim:      row.fact,
             kind:       row.kind,
             confidence: row.confidence,
@@ -308,7 +312,7 @@ async function phaseBFenceFacts(
             context:    row.context ?? undefined,
           });
           body = updated;
-          existingKeySet.add(key);
+          usedRows.add(rowNum);
           assignments.push({ id: row.id, row_num: rowNum });
         }
 
