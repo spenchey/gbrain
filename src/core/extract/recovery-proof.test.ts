@@ -1,0 +1,10 @@
+import {test,expect} from 'bun:test';
+import {hasNoNewHalts,kindRecovered} from './recovery-proof.ts';
+const proof={version:1,kind:'facts.fence',source_id:'agent',captured_at:'2026-10-01T10:00:00Z',counts:{'2026-10-01':2}};
+const old={kind:'facts.fence',source_id:'agent',day:'2026-10-01',halt_count:2};
+test('later no-op rollups do not erase proof of a real recovery',()=>expect(hasNoNewHalts(proof,'facts.fence','agent',[old])).toBe(true));
+test('a new halt on the same day is not hidden',()=>expect(hasNoNewHalts(proof,'facts.fence','agent',[{...old,halt_count:3}])).toBe(false));
+test('a new halt after old days roll off is not hidden',()=>expect(hasNoNewHalts(proof,'facts.fence','agent',[{...old,day:'2026-10-02',halt_count:1}])).toBe(false));
+test('success in another source does not hide an unrecovered failure',()=>expect(kindRecovered('facts.fence',[{source_id:'agent',snapshot:proof}],[old,{...old,source_id:'investing'}])).toBe(false));
+test('each failing source requires its own verified receipt',()=>expect(kindRecovered('facts.fence',[{source_id:'agent',snapshot:proof},{source_id:'investing',snapshot:{...proof,source_id:'investing'}}],[old,{...old,source_id:'investing'}])).toBe(true));
+test('missing and malformed evidence fails closed',()=>{for(const s of [null,{}, {...proof,source_id:'investing'}, {...proof,captured_at:'bad'}, {...proof,counts:{'2026-10-01':-1}}])expect(hasNoNewHalts(s,'facts.fence','agent',[old])).toBe(false)});

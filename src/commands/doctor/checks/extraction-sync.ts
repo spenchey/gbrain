@@ -25,6 +25,7 @@ import { slugifyPath, slugifyCodePath, isCodeFilePath } from '../../../core/sync
 import { resolveSourceLocalFilePath } from '../../../core/markdown.ts';
 import { unverifiedExtractionFragment } from '../../../core/extraction-review.ts';
 import type { Check } from '../../doctor.ts';
+import { kindRecovered, type HaltBucket } from '../../../core/extract/recovery-proof.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
@@ -964,7 +965,51 @@ export async function computeExtractHealthCheck(
       expected_limit_count: number;
       halt_rate: number;
       last_updated_at: string | null;
+      last_success_at: string | null;
+      recovered: boolean;
     };
+
+    type ReceiptRow = {
+      kind: string;
+      last_success_at: Date | string | null;
+    };
+    const receiptRows = await engine.executeRaw<ReceiptRow>(
+      `SELECT
+         frontmatter->>'kind' AS kind,
+         MAX((frontmatter->>'extracted_at')::timestamptz) AS last_success_at
+       FROM pages
+       WHERE type = 'extract_receipt'
+         AND deleted_at IS NULL
+         AND (frontmatter->>'extracted_at')::timestamptz >= NOW() - INTERVAL '7 days'
+         AND COALESCE((frontmatter->>'total_rows')::int, 0) > 0
+       GROUP BY frontmatter->>'kind'`,
+      [],
+    );
+    const latestSuccessByKind = new Map(
+      receiptRows.map(r => [
+        r.kind,
+        r.last_success_at ? new Date(r.last_success_at).toISOString() : null,
+      ]),
+    );
+
+    const haltBuckets = await engine.executeRaw<HaltBucket>(
+      `SELECT kind, source_id, day::text, halt_count FROM extract_rollup_7d
+       WHERE day >= CURRENT_DATE - 7`, [],
+    );
+    const proofs = await engine.executeRaw<{kind: string; source_id: string; snapshot: unknown}>(
+      `SELECT DISTINCT ON (source_id, frontmatter->>'kind')
+         frontmatter->>'kind' AS kind, source_id, frontmatter->'halt_snapshot' AS snapshot
+       FROM pages WHERE type = 'extract_receipt' AND deleted_at IS NULL
+         AND (frontmatter->>'extracted_at')::timestamptz >= NOW() - INTERVAL '7 days'
+         AND COALESCE((frontmatter->>'total_rows')::int, 0) > 0
+         AND frontmatter ? 'halt_snapshot'
+       ORDER BY source_id, frontmatter->>'kind', (frontmatter->>'extracted_at')::timestamptz DESC`, [],
+    );
+
+    // A successful extractor writes its receipt immediately before updating
+    // the rollup. Treat a receipt within this narrow window as proof that the
+    // latest attempt recovered. Historical halt counts remain in details.
+    const RECOVERY_RECEIPT_WINDOW_MS = 30_000;
 
     const kinds: KindAggregate[] = rows.map(r => {
       const halts = Number(r.halt_count) || 0;
@@ -975,6 +1020,16 @@ export async function computeExtractHealthCheck(
       // not self-imposed capacity limits. A backlog-bigger-than-budget brain
       // whose every run banks progress and stops at the cap reads 0%.
       const total = halts + completed + expectedLimits;
+      const lastUpdatedAt = r.last_updated_at
+        ? new Date(r.last_updated_at).toISOString()
+        : null;
+      const lastSuccessAt = latestSuccessByKind.get(r.kind) ?? null;
+      const kindProofs = proofs.filter(p => p.kind === r.kind);
+      const recovered = kindProofs.length > 0
+        ? kindRecovered(r.kind, kindProofs, haltBuckets)
+        : !!lastUpdatedAt && !!lastSuccessAt &&
+          Math.abs(new Date(lastUpdatedAt).getTime() - new Date(lastSuccessAt).getTime()) <=
+            RECOVERY_RECEIPT_WINDOW_MS;
       return {
         kind: r.kind,
         cost_7d_usd: Number(r.cost_7d_usd) || 0,
@@ -984,9 +1039,9 @@ export async function computeExtractHealthCheck(
         round_completed_count: completed,
         expected_limit_count: expectedLimits,
         halt_rate: total > 0 ? halts / total : 0,
-        last_updated_at: r.last_updated_at
-          ? new Date(r.last_updated_at).toISOString()
-          : null,
+        last_updated_at: lastUpdatedAt,
+        last_success_at: lastSuccessAt,
+        recovered,
       };
     });
 
@@ -997,7 +1052,8 @@ export async function computeExtractHealthCheck(
 
     // High halt rates: per F-OUT-19 doctor surfaces extractor health
     // distinctly from rollup write health.
-    const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10);
+    const highHaltKinds = kinds.filter(k => k.halt_rate > 0.10 && !k.recovered);
+    const recoveredHighHaltKinds = kinds.filter(k => k.halt_rate > 0.10 && k.recovered);
 
     if (highHaltKinds.length > 0) {
       // Each row's halt_count/round_completed_count are 7-day SUMS (the
@@ -1058,7 +1114,9 @@ export async function computeExtractHealthCheck(
     return {
       name,
       status: 'ok',
-      message: `${kinds.length} kind(s) tracked, all halt rates below 10%${capNote}`,
+      message: recoveredHighHaltKinds.length > 0
+        ? `${kinds.length} kind(s) tracked; ${recoveredHighHaltKinds.length} high historical halt rate(s) recovered by the latest successful receipt${capNote}`
+        : `${kinds.length} kind(s) tracked, all halt rates below 10%${capNote}`,
       details: {
         schema_version: 1,
         kinds,

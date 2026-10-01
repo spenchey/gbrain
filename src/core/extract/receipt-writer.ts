@@ -37,6 +37,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import type { Page } from '../types.ts';
+import { captureHaltSnapshot } from './recovery-proof.ts';
 
 /**
  * Round identifier. Matches the progressive-batch primitive's Stage
@@ -206,6 +207,13 @@ export async function writeReceipt(
   const slug = receiptSlug(input);
   const title = `${input.kind} — ${input.round} — ${input.source_id}`;
   const frontmatter = buildReceiptFrontmatter(input);
+  if (input.total_rows > 0) {
+    try {
+      frontmatter.halt_snapshot = await captureHaltSnapshot(engine, input.kind, input.source_id);
+    } catch {
+      // A missing proof must not prevent the receipt; doctor fails closed.
+    }
+  }
   const compiled_truth = buildReceiptBody(input);
 
   const page = await engine.putPage(
