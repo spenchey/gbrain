@@ -40,6 +40,7 @@
 import type { BrainEngine, FactInsertStatus, NewFact } from '../engine.ts';
 import type { ResolutionSource } from '../entities/resolve.ts';
 import { isFactsBackstopEligible } from './eligibility.ts';
+import { isNullLikeEntity } from './entity-ref.ts';
 import type { PageType } from '../types.ts';
 
 export interface FactsBackstopCtx {
@@ -610,8 +611,9 @@ async function runPipelineBodyInner(
     // D4: notability filter applied post-extraction, pre-insert.
     if (filter === 'high-only' && f.notability !== 'high') continue;
 
-    const resolved = f.entity_slug
-      ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, f.entity_slug)
+    const rawEntity = f.entity_slug;
+    const resolved = rawEntity !== null && !isNullLikeEntity(rawEntity)
+      ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, rawEntity)
       : null;
     const resolvedSlug = resolved?.slug ?? null;
     const resolutionSource = resolved?.source ?? null;

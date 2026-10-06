@@ -78,12 +78,12 @@ const meetingPage = (slug = 'meetings/test-' + Math.random().toString(36).slice(
   frontmatter: {} as Record<string, unknown>,
 });
 
-async function factsForIds(ids: number[]): Promise<Array<{ fact: string }>> {
+async function factsForIds(ids: number[]): Promise<Array<{ fact: string; entity_slug: string | null }>> {
   return Promise.all(ids.map(async (id) => {
     // PGLite's test engine deliberately exposes its raw query client for
     // storage assertions where the public API only offers scoped listings.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rows = await (engine as any).db.query('SELECT fact FROM facts WHERE id = $1', [id]);
+    const rows = await (engine as any).db.query('SELECT fact, entity_slug FROM facts WHERE id = $1', [id]);
     return rows.rows[0];
   }));
 }
@@ -215,6 +215,17 @@ describe('runFactsBackstop — mode: inline', () => {
       expect(r.inserted).toBe(0);
       expect(r.duplicate).toBe(0);
       expect(r.fact_ids.length).toBe(0);
+    }
+  });
+
+  test('null-like extracted entity stays unparented instead of creating a phantom slug', async () => {
+    chatStub([{ fact: 'subjectless-calendar-fact', kind: 'event', notability: 'medium', entity: 'null' }]);
+    const r = await runFactsBackstop(meetingPage(), makeCtx({ mode: 'inline' }));
+    expect(r.mode).toBe('inline');
+    if (r.mode === 'inline') {
+      expect(r.inserted).toBe(1);
+      const rows = await factsForIds(r.fact_ids);
+      expect(rows).toEqual([{ fact: 'subjectless-calendar-fact', entity_slug: null }]);
     }
   });
 
